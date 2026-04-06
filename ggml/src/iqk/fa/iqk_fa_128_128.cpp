@@ -14,6 +14,14 @@ IQK_FA_CASE(iqk_fa_128_128) {
     auto cv = (const char *)v;
     auto cm = (const char *)mask;
 
+#if defined(__AVX512F__)
+    // AVX-512 optimized: Prefer K_CHUNK=64 for better register utilization
+    // across D_HEAD=128 and D_HEAD=256, reducing L2 cache pressure
+    if (nk%64 == 0) {
+        return iqk_flash_helper_T<128, 128, 64>(type_k, type_v, nq, nk, stride_q, stride_k, stride_v, stride_m, stride_qkv,
+                q, ck, cv, cm, scale, softcap, qkv, sinkf, M, S);
+    }
+#else
 #ifdef __AVX512BF16__
     if (type_k == GGML_TYPE_BF16) {
         if (type_v != GGML_TYPE_BF16) return false; // we do not support mixing bf16 k-cache with other types
@@ -36,6 +44,7 @@ IQK_FA_CASE(iqk_fa_128_128) {
         return iqk_flash_helper_T<128, 128, 64>(type_k, type_v, nq, nk, stride_q, stride_k, stride_v, stride_m, stride_qkv,
                 q, ck, cv, cm, scale, softcap, qkv, sinkf, M, S);
     }
+#endif
 
     return iqk_flash_helper_T<128, 128, 32>(type_k, type_v, nq, nk, stride_q, stride_k, stride_v, stride_m, stride_qkv,
                 q, ck, cv, cm, scale, softcap, qkv, sinkf, M, S);

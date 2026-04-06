@@ -2051,6 +2051,16 @@ inline void iqk_flash_helper(KHelper& kh, VHelper& vh, int nq1, int nk1, int str
         if (M && S) { M += n; S += n; }
         return false;
     };
+#if defined(__AVX512F__)
+    // AVX-512 optimized: Q_CHUNK=128 for D_HEAD=128/256 perfectly saturates 512-bit registers
+    // (16 floats per register * 8 registers = 128 floats, matching head dimensions)
+    if (nk1 >= 512 && nq1 >= 128) {
+        int n_step = nq1/128;
+        FlashAttn<Dk, Dv, 128, k_step> fa(scale, softcap, sinkf);
+        fa.compute(kh, vh, 128*n_step, nk1, stride_q, stride_m, stride_qkv, q, (const char *)mask, qkv, M, S);
+        if (update(128*n_step)) return;
+    }
+#endif
     if (nk1 >= 512) {
         if (nq1 >= 128) {
             int n_step = nq1/128;
