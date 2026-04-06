@@ -2914,6 +2914,31 @@ void  server_context::create_checkpoint_at_interval(server_slot & slot, const gp
 
 void server_context::apply_checkpoint(server_slot & slot) {
     llama_pos pos_next = slot.cache_tokens.pos_next(slot.n_past);
+    
+    // For hybrid models (Qwen 3.5, Qwen3Next, etc.) with recurrent states,
+    // we must NOT erase checkpoints or reset n_past, as this destroys
+    // the recurrent memory (Gated Delta Network states).
+    const llama_model* model = llama_get_model(slot.ctx);
+    const bool has_recurrent_state = llama_model_has_recurrent(model);
+    
+    if (has_recurrent_state) {
+        // Bypass all checkpoint deletion and full-prompt-reset logic for hybrid models
+        // Simply clean up old checkpoints that are too old, but never force n_past = 0
+        for (auto it = slot.server_cached_prompt.checkpoints.begin(); it != slot.server_cached_prompt.checkpoints.end();) {
+            const auto & cur = *it;
+            // Only erase checkpoints that are completely before the current position
+            if (cur.pos_max < slot.n_past) {
+                SLT_WRN(slot, "erased stale context checkpoint (pos_min = %d, pos_max = %d, size = %.3f MiB)\n", 
+                    cur.pos_min, cur.pos_max, (float)cur.data.size() / 1024 / 1024);
+                it = slot.server_cached_prompt.checkpoints.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        return;
+    }
+    
+    // Standard transformer checkpoint logic follows...
     const auto pos_min_thold = std::max(0, pos_next - 1);
     if (slot.n_past > 0 && slot.n_past < slot.cache_tokens.n_tokens()) {
         int32_t pos_min = llama_kv_cache_seq_pos_min(slot.ctx, slot.id);
