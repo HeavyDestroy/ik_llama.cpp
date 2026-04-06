@@ -54,7 +54,6 @@ IQK_FA_CASE(iqk_fa_256_256) {
         return iqk_flash_helper_T<256, 256, 64>(type_k, type_v, nq, nk, stride_q, stride_k, stride_v, stride_m, stride_qkv,
                 q, ck, cv, cm, scale, softcap, qkv, sinkf, M, S);
     }
-#endif
 
     return iqk_flash_helper_T<256, 256, 32>(type_k, type_v, nq, nk, stride_q, stride_k, stride_v, stride_m, stride_qkv,
                 q, ck, cv, cm, scale, softcap, qkv, sinkf, M, S);
