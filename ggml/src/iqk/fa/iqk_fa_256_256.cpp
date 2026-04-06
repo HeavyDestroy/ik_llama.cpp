@@ -17,7 +17,8 @@ IQK_FA_CASE(iqk_fa_256_256) {
 #if defined(__AVX512F__)
     // AVX-512 optimized: Prefer K_CHUNK=64 for better register utilization
     // across D_HEAD=128 and D_HEAD=256, reducing L2 cache pressure
-    if (nk%64 == 0) {
+    // Only apply to prefill (nq > 1), not decode (nq == 1) to avoid loop overhead
+    if (nq > 1 && nk%64 == 0) {
         return iqk_flash_helper_T<256, 256, 64>(type_k, type_v, nq, nk, stride_q, stride_k, stride_v, stride_m, stride_qkv,
                 q, ck, cv, cm, scale, softcap, qkv, sinkf, M, S);
     }
