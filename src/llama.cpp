@@ -736,7 +736,7 @@ static bool llama_kv_cache_init(
     cache.hybrid = llm_arch_is_hybrid(model.arch);
     // qwen3next uses hybrid recurrent+attention cache semantics. Keep V rows in
     // standard layout to match the mainline hybrid path when flash attention is off.
-    cache.v_trans   = !cache.recurrent && !cparams.flash_attn && !llm_arch_is_hybrid(model.arch);
+    cache.v_trans = !cache.recurrent && !cparams.flash_attn;
 
     cache.head = 0;
     cache.size = kv_size;
@@ -882,7 +882,7 @@ static bool llama_kv_cache_init(
                 continue;
             }
             if (qnext_recurrent) {
-                s = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hparams.n_embd_v_s(), qnext_state_slots);
+                s = ggml_new_tensor_2d(ctx, GGML_TYPE_BF16, hparams.n_embd_v_s(), qnext_state_slots);
                 auto s_name = std::string{"cache_s_l"} + std::to_string(i);
                 ggml_set_name(s, s_name.c_str());
                 cache.s_l[i] = s;
@@ -903,7 +903,7 @@ static bool llama_kv_cache_init(
                         GGML_ASSERT(split->ne[0] % head_v_dim == 0);
                         int nv = split->ne[0] / head_v_dim;
                         auto size = hparams.n_embd_v_s_id(nv);
-                        split_s_l.tensor_splits[is] = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, size, qnext_state_slots);
+                        split_s_l.tensor_splits[is] = ggml_new_tensor_2d(ctx, GGML_TYPE_BF16, size, qnext_state_slots);
                         auto split_name = s_name + '.' + std::to_string(is);
                         ggml_set_name(split_s_l.tensor_splits[is], split_name.c_str());
                         mem_split[is] += ggml_nbytes(split_s_l.tensor_splits[is]);

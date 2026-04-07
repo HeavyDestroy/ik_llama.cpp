@@ -296,7 +296,7 @@ ggml_tensor * delta_net::build_qkv(ggml_context * ctx0, ggml_tensor * state_stor
 
     size_t state_row_size = 0;
     ggml_tensor * state_all = nullptr;
-    GGML_ASSERT(state_storage->type == GGML_TYPE_F32);
+    GGML_ASSERT(state_storage->type == GGML_TYPE_F32 || state_storage->type == GGML_TYPE_BF16);
     GGML_ASSERT(state_storage->ne[0] >= state_dim);
     GGML_ASSERT((uint32_t) state_storage->ne[1] == qnext_state_slots);
     state_row_size = state_storage->nb[1];

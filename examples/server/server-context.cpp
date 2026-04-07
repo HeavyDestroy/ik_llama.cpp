@@ -2914,7 +2914,8 @@ void  server_context::create_checkpoint_at_interval(server_slot & slot, const gp
 
 void server_context::apply_checkpoint(server_slot & slot) {
     llama_pos pos_next = slot.cache_tokens.pos_next(slot.n_past);
-    const auto pos_min_thold = std::max(0, pos_next - 1);
+    const bool is_hybrid = llama_model_is_hybrid(model);
+    const auto pos_min_thold = is_hybrid ? (llama_pos) 0 : std::max(0, pos_next - 1);
     if (slot.n_past > 0 && slot.n_past < slot.cache_tokens.n_tokens()) {
         int32_t pos_min = llama_kv_cache_seq_pos_min(slot.ctx, slot.id);
 
@@ -2926,6 +2927,10 @@ void server_context::apply_checkpoint(server_slot & slot) {
                 slot.server_cached_prompt.checkpoints.rbegin(),
                 slot.server_cached_prompt.checkpoints.rend(),
                 [&](const auto & cur) {
+                    if (is_hybrid) {
+                        // For hybrid/recurrent: use position-matching semantics
+                        return cur.pos_max <= slot.n_past && cur.pos_max < pos_next;
+                    }
                     // guarantee that a checkpoint will result in at least one token being processed [TAG_PROMPT_LOGITS]
                     return cur.pos_min < pos_min_thold;
                 }
@@ -2953,19 +2958,24 @@ void server_context::apply_checkpoint(server_slot & slot) {
             }
 
             if (do_reset) {
-                SLT_WRN(slot, "forcing full prompt re-processing due to lack of cache data (likely due to SWA or hybrid/recurrent memory, see %s)\n",
-                    "https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055");
-                slot.n_past = 0;
-                slot.n_past_prompt = 0;
+                if (is_hybrid) {
+                    // For hybrid/recurrent: preserve current state, do not zero n_past
+                    SLT_WRN(slot, "no matching recurrent checkpoint; preserving prompt state (n_past = %d)\n", slot.n_past);
+                } else {
+                    SLT_WRN(slot, "forcing full prompt re-processing due to lack of cache data (likely due to SWA or hybrid/recurrent memory, see %s)\n",
+                        "https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055");
+                    slot.n_past = 0;
+                    slot.n_past_prompt = 0;
+                }
             }
         }
     }
 
     {
-        // erase any checkpoints with pos_min > pos_min_thold
+        // erase any checkpoints with pos_min > pos_min_thold (non-recurrent only)
         for (auto it = slot.server_cached_prompt.checkpoints.begin(); it != slot.server_cached_prompt.checkpoints.end();) {
             const auto & cur = *it;
-            if (cur.pos_min > pos_min_thold) {
+            if (!is_hybrid && cur.pos_min > pos_min_thold) {
                 SLT_WRN(slot, "erased invalidated context checkpoint (pos_min = %d, pos_max = %d, size = %.3f MiB)\n", cur.pos_min, cur.pos_max, (float)cur.data.size() / 1024 / 1024);
                 it = slot.server_cached_prompt.checkpoints.erase(it);
             } else {
@@ -2985,6 +2995,16 @@ bool server_context::create_checkpoint(server_slot & slot) {
 
     // no need to create checkpoints that are too close together
     do_checkpoint = do_checkpoint && (slot.server_cached_prompt.checkpoints.empty() || pos_max > slot.server_cached_prompt.checkpoints.back().pos_max);
+
+    // for hybrid/recurrent models: enforce minimum token distance to prevent memory bloat during long prompts
+    // (e.g., 1024-token prefill shouldn't create 32 checkpoints)
+    const bool is_hybrid = llama_model_is_hybrid(model);
+    if (is_hybrid && !slot.server_cached_prompt.checkpoints.empty()) {
+        const int32_t last_pos_max = slot.server_cached_prompt.checkpoints.back().pos_max;
+        if (pos_max <= last_pos_max + 128) {
+            do_checkpoint = false;
+        }
+    }
 
     if (do_checkpoint) {
         const int64_t t_start = ggml_time_us();
