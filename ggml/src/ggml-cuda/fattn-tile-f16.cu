@@ -109,7 +109,12 @@ static __global__ void flash_attn_tile_ext_f16(
     __syncthreads();
 
     const int k_start = parallel_blocks == 1 ? 0 : ip*FATTN_KQ_STRIDE_TILE_F16;
+    const int causal_mask_end = ic0 + ncols - 1; // K-loop splitting: last useful K position
+
     for (int k_VKQ_0 = k_start; k_VKQ_0 < ne11; k_VKQ_0 += parallel_blocks*FATTN_KQ_STRIDE_TILE_F16) {
+        // K-loop splitting optimization: skip completely masked tiles for causal attention
+        if (k_VKQ_0 > causal_mask_end) break;
+        
         // Calculate KQ tile and keep track of new maximum KQ values:
 
         half kqmax_new[ncols/nwarps];
