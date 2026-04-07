@@ -9,7 +9,7 @@
 #include "fattn-common.cuh"
 #include "fattn-tile-f16.cuh"
 
-#define FATTN_KQ_STRIDE_TILE_F16 64
+#define FATTN_KQ_STRIDE_TILE_F16 128  // Optimized for Ampere/Ada (192KB SMEM, 2MB L2)
 
 template<int D, int ncols, int nwarps, int parallel_blocks, bool use_softcap> // D == head size
 #if !(defined(GGML_USE_HIPBLAS) && defined(__HIP_PLATFORM_AMD__))
@@ -196,7 +196,9 @@ static __global__ void flash_attn_tile_ext_f16(
             const int j = j0 + threadIdx.y;
 
             kqmax_new[j0/nwarps] = warp_reduce_max(kqmax_new[j0/nwarps]);
-            const half2 KQ_max_scale = __half2half2(hexp(kqmax[j0/nwarps] - kqmax_new[j0/nwarps]));
+            // CUDA 13.2 optimization: Use hardware FTZ for faster exp2 with denormals
+            const half diff_scale = kqmax[j0/nwarps] - kqmax_new[j0/nwarps];
+            const half2 KQ_max_scale = __half2half2(hexp2(diff_scale));
             kqmax[j0/nwarps] = kqmax_new[j0/nwarps];
 
 #pragma unroll
@@ -204,7 +206,8 @@ static __global__ void flash_attn_tile_ext_f16(
                 const int i = i0 + threadIdx.x;
 
                 const half2 diff = KQ2[j*(FATTN_KQ_STRIDE_TILE_F16/2) + i] - __half2half2(kqmax[j0/nwarps]);
-                const half2 val = h2exp(diff);
+                // Hardware FTZ: exp2 is faster than exp for half precision on Ampere/Ada
+                const half2 val = h2exp2(diff); 
                 kqsum[j0/nwarps] = kqsum[j0/nwarps]*KQ_max_scale + val;
                 KQ2[j*(FATTN_KQ_STRIDE_TILE_F16/2) + i] = val;
             }
