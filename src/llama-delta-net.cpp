@@ -306,7 +306,9 @@ ggml_tensor * delta_net::build_qkv(ggml_context * ctx0, ggml_tensor * state_stor
 
     ggml_tensor * state_dst = ggml_view_2d(ctx0, state_all, state_dim, 1, state_row_size, state_seq_id_local * state_row_size);
     ggml_tensor * state_f32 = state_dst;
-    if (state_f32->type != GGML_TYPE_F32) {
+    // Skip BF16→F32 cast: CUDA delta_net kernel handles BF16 state natively.
+    // CPU path handles BF16→F32 conversion in ggml_compute_forward_delta_net.
+    if (state_f32->type != GGML_TYPE_F32 && state_f32->type != GGML_TYPE_BF16) {
         state_f32 = ggml_cast(ctx0, state_f32, GGML_TYPE_F32);
     }
     if (reset_state_local) {

@@ -9917,7 +9917,7 @@ struct ggml_tensor * ggml_delta_net(
     GGML_ASSERT(v->type == GGML_TYPE_F32);
     GGML_ASSERT(g->type == GGML_TYPE_F32);
     GGML_ASSERT(beta->type == GGML_TYPE_F32);
-    GGML_ASSERT(state->type == GGML_TYPE_F32);
+    GGML_ASSERT(state->type == GGML_TYPE_F32 || state->type == GGML_TYPE_BF16);
 
     const int64_t S_k      = q->ne[0];
     const int64_t n_tokens = q->ne[1];
@@ -9938,7 +9938,9 @@ struct ggml_tensor * ggml_delta_net(
     const int64_t output_size = S_v * H_v * n_tokens * n_seqs;
     const int64_t state_size  = S_v * S_v * H_v * n_seqs;
 
-    struct ggml_tensor * result = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, output_size + state_size);
+    // Result type matches state type: F32 state → F32 output, BF16 state → BF16 output
+    // Q/K/V/G/beta remain F32 (intermediate compute values), state I/O uses its native type
+    struct ggml_tensor * result = ggml_new_tensor_1d(ctx, state->type, output_size + state_size);
 
     result->op     = GGML_OP_DELTA_NET;
     result->src[0] = q;
@@ -22723,7 +22725,140 @@ static void ggml_compute_forward_delta_net(
         struct ggml_tensor * dst) {
     switch (dst->src[0]->type) {
         case GGML_TYPE_F32:
-            ggml_compute_forward_delta_net_f32(params, dst);
+            if (dst->src[5]->type == GGML_TYPE_BF16 && dst->type == GGML_TYPE_BF16) {
+                // BF16 state + BF16 output: convert state to F32, run F32 kernel in temp buffers, convert back
+                const struct ggml_tensor * src5 = dst->src[5];
+                const int64_t head_dim = dst->src[0]->ne[0];
+                const int64_t n_tokens = dst->src[0]->ne[1];
+                const int64_t n_heads  = dst->src[2]->ne[2];
+                const int64_t n_seqs   = dst->src[0]->ne[3];
+                const int64_t output_elems = head_dim * n_tokens * n_heads * n_seqs;
+                const int64_t state_elems  = head_dim * head_dim * n_heads * n_seqs;
+                const int64_t total_elems  = output_elems + state_elems;
+
+                // Temp F32 buffers
+                float * state_in_f32  = (float *) malloc(state_elems * sizeof(float));
+                float * tmp_dst       = (float *) malloc(total_elems * sizeof(float));
+                GGML_ASSERT(state_in_f32 && tmp_dst);
+
+                ggml_bf16_to_fp32_row((const ggml_bf16_t *) src5->data, state_in_f32, state_elems);
+
+                const float * q_data    = (const float *) dst->src[0]->data;
+                const float * k_data    = (const float *) dst->src[1]->data;
+                const float * v_data    = (const float *) dst->src[2]->data;
+                const float * g_data    = (const float *) dst->src[3]->data;
+                const float * beta_data = (const float *) dst->src[4]->data;
+                float * state_out_f32   = tmp_dst + output_elems;
+
+                const int ith = params->ith;
+                const int nth = params->nth;
+                const int repeat_type = dst->op_params[0];
+                const int64_t gqa_ratio = dst->src[2]->ne[2] / dst->src[0]->ne[2];
+
+                // Try iqk fast path
+                bool iqk_ok = iqk_fused_delta_net(head_dim, n_heads, gqa_ratio, repeat_type,
+                    n_tokens, n_seqs,
+                    dst->src[2]->nb[1]/sizeof(float), dst->src[2]->nb[2]/sizeof(float), dst->src[2]->nb[3]/sizeof(float),
+                    q_data, k_data, v_data, g_data, beta_data, state_in_f32,
+                    tmp_dst, state_out_f32, ith, nth);
+
+                if (!iqk_ok) {
+                    // Scalar fallback
+                    const int64_t total_heads = n_heads * n_seqs;
+                    const int64_t heads_per_thread = (total_heads + nth - 1) / nth;
+                    const int64_t h_start = ith * heads_per_thread;
+                    const int64_t h_end = (h_start + heads_per_thread < total_heads) ? h_start + heads_per_thread : total_heads;
+
+                    const float eps = 1e-12f;
+                    const float scale = 1.0f / sqrtf((float) head_dim);
+                    float * v_new_buf = (float *) malloc(head_dim * sizeof(float));
+                    GGML_ASSERT(v_new_buf);
+
+                    for (int64_t h_idx = h_start; h_idx < h_end; ++h_idx) {
+                        const int64_t batch_idx = h_idx / n_heads;
+                        const int64_t head_idx  = h_idx % n_heads;
+                        const int64_t head_idx_kq = repeat_type == 0 ? head_idx / gqa_ratio : head_idx % (n_heads/gqa_ratio);
+
+                        const int64_t qkv_head_offset  = batch_idx * (head_dim * n_tokens * n_heads) + head_idx * (head_dim * n_tokens);
+                        const int64_t qkv_head_offset_kq = batch_idx * (head_dim * n_tokens * n_heads/gqa_ratio) + head_idx_kq * (head_dim * n_tokens);
+                        const int64_t qkv_token_stride = head_dim;
+                        const int64_t g_head_offset    = batch_idx * (n_tokens * n_heads) + head_idx * n_tokens;
+                        const int64_t state_head_offset = batch_idx * (head_dim * head_dim * n_heads) + head_idx * (head_dim * head_dim);
+                        const int64_t out_head_offset  = batch_idx * (head_dim * n_heads * n_tokens) + head_idx * head_dim;
+                        const int64_t out_token_stride = head_dim * n_heads;
+
+                        for (int64_t i = 0; i < head_dim * head_dim; ++i) {
+                            state_out_f32[state_head_offset + i] = state_in_f32[state_head_offset + i];
+                        }
+
+                        float * state = state_out_f32 + state_head_offset;
+
+                        for (int64_t t = 0; t < n_tokens; ++t) {
+                            const float * q_t = q_data + qkv_head_offset_kq + t * qkv_token_stride;
+                            const float * k_t = k_data + qkv_head_offset_kq + t * qkv_token_stride;
+                            const float * v_t = v_data + qkv_head_offset + t * qkv_token_stride;
+
+                            const float g_val    = g_data[g_head_offset + t];
+                            const float beta_raw = beta_data[g_head_offset + t];
+
+                            float q_norm_sq = 0.0f;
+                            float k_norm_sq = 0.0f;
+                            for (int64_t i = 0; i < head_dim; ++i) {
+                                q_norm_sq += q_t[i] * q_t[i];
+                                k_norm_sq += k_t[i] * k_t[i];
+                            }
+                            const float q_norm_inv = 1.0f / sqrtf(q_norm_sq + eps);
+                            const float k_norm_inv = 1.0f / sqrtf(k_norm_sq + eps);
+
+                            const float beta_val = 1.0f / (1.0f + expf(-beta_raw));
+                            const float decay    = expf(fminf(g_val, 50.0f));
+
+                            float attn_score = 0.0f;
+                            for (int64_t i = 0; i < head_dim; ++i) {
+                                attn_score += (k_t[i] * k_norm_inv) * (q_t[i] * q_norm_inv * scale);
+                            }
+
+                            float * out_t = tmp_dst + out_head_offset + t * out_token_stride;
+
+                            for (int64_t row = 0; row < head_dim; ++row) {
+                                float v_prime = 0.0f;
+                                float out_val = 0.0f;
+
+                                for (int64_t col = 0; col < head_dim; ++col) {
+                                    const float k_col = k_t[col];
+                                    const float q_col = q_t[col];
+                                    const float s = state[row + col * head_dim];
+
+                                    v_prime += s * k_col;
+                                    out_val += s * q_col;
+                                }
+
+                                const float v_new = v_t[row] * beta_val - v_prime * beta_val * decay * k_norm_inv;
+                                v_new_buf[row] = v_new;
+                                out_t[row] = out_val * decay * q_norm_inv * scale + v_new * attn_score;
+                            }
+
+                            for (int64_t col = 0; col < head_dim; ++col) {
+                                const float k_col = k_t[col] * k_norm_inv;
+                                for (int64_t row = 0; row < head_dim; ++row) {
+                                    float s = state[row + col * head_dim];
+                                    s = decay * s + v_new_buf[row] * k_col;
+                                    state[row + col * head_dim] = fminf(fmaxf(s, -1e6f), 1e6f);
+                                }
+                            }
+                        }
+                    }
+                    free(v_new_buf);
+                }
+
+                // Convert F32 output back to BF16 in dst
+                ggml_fp32_to_bf16_row_ref(tmp_dst, (ggml_bf16_t *) dst->data, total_elems);
+
+                free(state_in_f32);
+                free(tmp_dst);
+            } else {
+                ggml_compute_forward_delta_net_f32(params, dst);
+            }
             break;
         default:
             GGML_ABORT("fatal error");
