@@ -286,9 +286,9 @@ void ggml_cuda_op_reduce([[maybe_unused]] ggml_backend_cuda_context & ctx, ggml_
                 }
                 if (size_per_device > this_ctx->copy_size) {
                     if (this_ctx->copy_buffer) {
-                        CUDA_CHECK(cudaFree(this_ctx->copy_buffer));
+                        CUDA_CHECK(cudaFreeAsync(this_ctx->copy_buffer, ggml_cuda_device_alloc_streams[this_ctx->device]));
                     }
-                    CUDA_CHECK(ggml_cuda_device_malloc(&this_ctx->copy_buffer, size_per_device, this_ctx->device));
+                    CUDA_CHECK(ggml_cuda_device_malloc(&this_ctx->copy_buffer, size_per_device, this_ctx->device, ggml_cuda_device_alloc_streams[this_ctx->device]));
                     this_ctx->copy_size = size_per_device;
                 }
             }
@@ -524,9 +524,9 @@ void ggml_cuda_op_reduce([[maybe_unused]] ggml_backend_cuda_context & ctx, ggml_
     auto required_size = nbytes*(nhave-1);
     if (required_size > ctx.copy_size) {
         if (ctx.copy_buffer) {
-            CUDA_CHECK(cudaFree(ctx.copy_buffer));
+            CUDA_CHECK(cudaFreeAsync(ctx.copy_buffer, ggml_cuda_device_alloc_streams[ctx.device]));
         }
-        CUDA_CHECK(ggml_cuda_device_malloc(&ctx.copy_buffer, required_size, ctx.device));
+        CUDA_CHECK(ggml_cuda_device_malloc(&ctx.copy_buffer, required_size, ctx.device, ggml_cuda_device_alloc_streams[ctx.device]));
         ctx.copy_size = required_size;
     }
     auto ptr = (char *)ctx.copy_buffer;

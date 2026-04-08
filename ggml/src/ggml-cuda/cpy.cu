@@ -170,9 +170,9 @@ void ggml_cuda_cpy_dest_ptrs_copy(ggml_cuda_graph * cuda_graph, char ** host_des
     if (cuda_graph->dest_ptrs_size < host_dest_ptrs_size) { // (re-)allocate GPU memory for destination pointers
         CUDA_CHECK(cudaStreamSynchronize(stream));
         if (cuda_graph->dest_ptrs_d != nullptr) {
-            CUDA_CHECK(cudaFree(cuda_graph->dest_ptrs_d));
+            CUDA_CHECK(cudaFreeAsync(cuda_graph->dest_ptrs_d, ggml_cuda_device_alloc_streams[ggml_cuda_get_device()]));
         }
-        CUDA_CHECK(cudaMalloc(&cuda_graph->dest_ptrs_d, host_dest_ptrs_size*sizeof(char *)));
+        CUDA_CHECK(ggml_cuda_device_malloc((void**)&cuda_graph->dest_ptrs_d, host_dest_ptrs_size*sizeof(char *), ggml_cuda_get_device(), ggml_cuda_device_alloc_streams[ggml_cuda_get_device()]));
         cuda_graph->dest_ptrs_size = host_dest_ptrs_size;
     }
     // copy destination pointers to GPU

@@ -151,7 +151,12 @@ int ggml_cuda_get_device() {
     return id;
 }
 
-cudaError_t ggml_cuda_device_malloc(void ** ptr, size_t size, int device) {
+// Per-device allocation stream for stream-ordered memory allocator.
+// Allocations/frees happen on this stream; compute kernels use ctx.stream().
+// The driver's default memory pool is used (no custom pool needed).
+cudaStream_t ggml_cuda_device_alloc_streams[GGML_CUDA_MAX_DEVICES] = {0};
+
+cudaError_t ggml_cuda_device_malloc(void ** ptr, size_t size, int device, cudaStream_t stream) {
     ggml_cuda_set_device(device);
 #if defined(GGML_USE_HIPBLAS) && defined(GGML_HIP_UMA)
     auto res = hipMallocManaged(ptr, size);
@@ -167,6 +172,15 @@ cudaError_t ggml_cuda_device_malloc(void ** ptr, size_t size, int device) {
     if (getenv("GGML_CUDA_ENABLE_UNIFIED_MEMORY") != nullptr)
     {
         err = cudaMallocManaged(ptr, size);
+    }
+    else if (stream != nullptr)
+    {
+        // Stream-ordered allocation from the device's default memory pool.
+        // Per CUDA 13.2 §4.3.2.1: the pointer is returned immediately and can
+        // be used on any stream once the allocating stream has progressed past
+        // the allocation node.  For cross-stream access we insert a sync point
+        // in the caller (see evaluate_and_capture_cuda_graph).
+        err = cudaMallocAsync(ptr, size, stream);
     }
     else
     {
@@ -318,10 +332,19 @@ struct ggml_cuda_pool_leg : public ggml_cuda_pool {
 
     ~ggml_cuda_pool_leg() {
         ggml_cuda_set_device(device);
+        // Synchronize alloc stream so we don't free memory still in use
+        cudaStream_t alloc_stream = ggml_cuda_device_alloc_streams[device];
+        if (alloc_stream != nullptr) {
+            CUDA_CHECK(cudaStreamSynchronize(alloc_stream));
+        }
         for (int i = 0; i < MAX_BUFFERS; ++i) {
             ggml_cuda_buffer & b = buffer_pool[i];
             if (b.ptr != nullptr) {
-                CUDA_CHECK(cudaFree(b.ptr));
+                if (alloc_stream != nullptr) {
+                    CUDA_CHECK(cudaFreeAsync(b.ptr, alloc_stream));
+                } else {
+                    CUDA_CHECK(cudaFree(b.ptr));
+                }
                 pool_size -= b.size;
             }
         }
@@ -370,7 +393,7 @@ struct ggml_cuda_pool_leg : public ggml_cuda_pool {
         size_t look_ahead_size = (size_t) (1.05 * size);
         look_ahead_size = 256 * ((look_ahead_size + 255)/256);
         ggml_cuda_set_device(device);
-        CUDA_CHECK(ggml_cuda_device_malloc(&ptr, look_ahead_size, device));
+        CUDA_CHECK(ggml_cuda_device_malloc(&ptr, look_ahead_size, device, ggml_cuda_device_alloc_streams[device]));
         *actual_size = look_ahead_size;
         pool_size += look_ahead_size;
 #ifdef DEBUG_CUDA_MALLOC
@@ -391,7 +414,12 @@ struct ggml_cuda_pool_leg : public ggml_cuda_pool {
         }
         GGML_CUDA_LOG_WARN("Cuda buffer pool full, increase MAX_CUDA_BUFFERS\n");
         ggml_cuda_set_device(device);
-        CUDA_CHECK(cudaFree(ptr));
+        cudaStream_t alloc_stream = ggml_cuda_device_alloc_streams[device];
+        if (alloc_stream != nullptr) {
+            CUDA_CHECK(cudaFreeAsync(ptr, alloc_stream));
+        } else {
+            CUDA_CHECK(cudaFree(ptr));
+        }
         pool_size -= size;
     }
 };
@@ -564,7 +592,14 @@ struct ggml_backend_cuda_buffer_context {
     }
 
     ~ggml_backend_cuda_buffer_context() {
-        CUDA_CHECK(cudaFree(dev_ptr));
+        if (dev_ptr != nullptr) {
+            cudaStream_t alloc_stream = ggml_cuda_device_alloc_streams[device];
+            if (alloc_stream != nullptr) {
+                CUDA_CHECK(cudaFreeAsync(dev_ptr, alloc_stream));
+            } else {
+                CUDA_CHECK(cudaFree(dev_ptr));
+            }
+        }
     }
 };
 
@@ -701,7 +736,7 @@ GGML_CALL static ggml_backend_buffer_t ggml_backend_cuda_buffer_type_alloc_buffe
     size = std::max(size, (size_t)1); // cudaMalloc returns null for size 0
 
     void * dev_ptr;
-    cudaError_t err = ggml_cuda_device_malloc(&dev_ptr, size, buft_ctx->device);
+    cudaError_t err = ggml_cuda_device_malloc(&dev_ptr, size, buft_ctx->device, ggml_cuda_device_alloc_streams[buft_ctx->device]);
     if (err != cudaSuccess) {
         // clear the error
         cudaGetLastError();
@@ -757,11 +792,20 @@ GGML_CALL ggml_backend_buffer_type_t ggml_backend_cuda_buffer_type(int device) {
     static bool ggml_backend_cuda_buffer_type_initialized = false;
 
     if (!ggml_backend_cuda_buffer_type_initialized) {
-        for (int i = 0; i < GGML_CUDA_MAX_DEVICES; i++) {
+        auto info = ggml_cuda_info();
+        int device_count = info.device_count;
+
+        for (int i = 0; i < device_count; i++) {
             ggml_backend_cuda_buffer_types[i] = {
                 /* .iface    = */ ggml_backend_cuda_buffer_type_interface,
                 /* .context  = */ new ggml_backend_cuda_buffer_type_context{i, GGML_CUDA_NAME + std::to_string(i)},
             };
+
+            // Create per-device non-blocking stream for async memory operations.
+            // cudaStreamNonBlocking: this stream does not synchronize with stream 0,
+            // so alloc/free on this stream won't block compute on other streams.
+            ggml_cuda_set_device(i);
+            CUDA_CHECK(cudaStreamCreateWithFlags(&ggml_cuda_device_alloc_streams[i], cudaStreamNonBlocking));
         }
         ggml_backend_cuda_buffer_type_initialized = true;
     }
@@ -837,7 +881,7 @@ GGML_CALL static void ggml_backend_cuda_split_buffer_init_tensor([[maybe_unused]
         }
         ggml_cuda_set_device(i);
         char * buf;
-        CUDA_CHECK(ggml_cuda_device_malloc((void**)&buf, padded_size, i));
+        CUDA_CHECK(ggml_cuda_device_malloc((void**)&buf, padded_size, i, ggml_cuda_device_alloc_streams[i]));
         if (padded_size > size) {
             CUDA_CHECK(cudaMemset(buf + size, 0, padded_size - size));
         }
@@ -4055,6 +4099,11 @@ GGML_CALL static void ggml_backend_cuda_synchronize(ggml_backend_t backend) {
     ggml_cuda_set_device(cuda_ctx->device);
     CUDA_CHECK(cudaStreamSynchronize(cuda_ctx->stream()));
 
+    // Also synchronize the allocation stream to ensure all async allocs/frees complete
+    if (ggml_cuda_device_alloc_streams[cuda_ctx->device] != nullptr) {
+        CUDA_CHECK(cudaStreamSynchronize(ggml_cuda_device_alloc_streams[cuda_ctx->device]));
+    }
+
     GGML_UNUSED(backend);
 }
 
@@ -4290,6 +4339,15 @@ static void evaluate_and_capture_cuda_graph(ggml_backend_cuda_context * cuda_ctx
         // Only perform the graph execution if CUDA graphs are not enabled, or we are capturing the graph.
         // With the use of CUDA graphs, the execution will be performed by the graph launch.
         if (!use_cuda_graph || cuda_graph_update_required) {
+            // Synchronize the allocation stream with the compute stream.
+            // Per CUDA 13.2 §4.3.2.1: "When accessing allocation from a stream
+            // other than the stream that made the allocation, the user must
+            // guarantee that the access occurs after the allocation operation."
+            // This sync ensures all prior cudaMallocAsync calls on alloc_stream
+            // complete before any kernel launches on the compute stream.
+            if (ggml_cuda_device_alloc_streams[cuda_ctx->device] != nullptr) {
+                CUDA_CHECK(cudaStreamSynchronize(ggml_cuda_device_alloc_streams[cuda_ctx->device]));
+            }
 
             for (int i = 0; i < cgraph->n_nodes; i++) {
                 ggml_tensor * node = cgraph->nodes[i];
@@ -4402,6 +4460,13 @@ GGML_CALL static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t
     }
 
     if (use_cuda_graph && cuda_graph_update_required) {
+        // Synchronize alloc stream before graph capture.
+        // Graph capture on compute stream must not be interleaved with
+        // async alloc/free operations on the alloc stream.
+        if (ggml_cuda_device_alloc_streams[cuda_ctx->device] != nullptr) {
+            CUDA_CHECK(cudaStreamSynchronize(ggml_cuda_device_alloc_streams[cuda_ctx->device]));
+        }
+
         // Start CUDA graph capture
         // Why are we protecting an atomic_int with a mutex?
         {

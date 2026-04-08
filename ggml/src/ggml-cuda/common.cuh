@@ -912,4 +912,7 @@ struct ggml_backend_cuda_context {
     }
 };
 
-cudaError_t ggml_cuda_device_malloc(void ** ptr, size_t size, int device);
+cudaError_t ggml_cuda_device_malloc(void ** ptr, size_t size, int device, cudaStream_t stream = nullptr);
+
+// Per-device allocation stream for stream-ordered memory allocator.
+extern cudaStream_t ggml_cuda_device_alloc_streams[GGML_CUDA_MAX_DEVICES];
