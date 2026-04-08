@@ -306,26 +306,24 @@ ggml_tensor * delta_net::build_qkv(ggml_context * ctx0, ggml_tensor * state_stor
 
     ggml_tensor * state_dst = ggml_view_2d(ctx0, state_all, state_dim, 1, state_row_size, state_seq_id_local * state_row_size);
     ggml_tensor * state_f32 = state_dst;
-    // Skip BF16→F32 cast: CUDA delta_net kernel handles BF16 state natively.
-    // CPU path handles BF16→F32 conversion in ggml_compute_forward_delta_net.
-    if (state_f32->type != GGML_TYPE_F32 && state_f32->type != GGML_TYPE_BF16) {
+    if (state_f32->type != GGML_TYPE_F32) {
         state_f32 = ggml_cast(ctx0, state_f32, GGML_TYPE_F32);
     }
     if (reset_state_local) {
-        // ggml_scale only supports F32 — cast up for reset, then cast back to original type
-        if (state_f32->type != GGML_TYPE_F32) {
-            state_f32 = ggml_cast(ctx0, state_f32, GGML_TYPE_F32);
-        }
         state_f32 = ggml_scale(ctx0, state_f32, 0.0f);
         cb(state_f32, "state_reset", il);
-        if (state_dst->type == GGML_TYPE_BF16) {
-            state_f32 = ggml_cast(ctx0, state_f32, GGML_TYPE_BF16);
-        }
     }
 
+    // Conv state always needs F32 (ssm_conv kernel requires it)
     ggml_tensor * conv_state_flat = ggml_view_2d(ctx0, state_f32, conv_state_dim, 1, state_f32->nb[1], 0);
-    ggml_tensor * ssm_state_flat  = ggml_view_2d(ctx0, state_f32, ssm_state_dim, 1, state_f32->nb[1],
+
+    // SSM state: cast to BF16 for CUDA delta_net kernel (eliminates F32 read + internal cast)
+    ggml_tensor * ssm_state_flat_f32 = ggml_view_2d(ctx0, state_f32, ssm_state_dim, 1, state_f32->nb[1],
             conv_state_dim * ggml_element_size(state_f32));
+    ggml_tensor * ssm_state_flat = ssm_state_flat_f32;
+    if (state_dst->type == GGML_TYPE_BF16) {
+        ssm_state_flat = ggml_cast(ctx0, ssm_state_flat_f32, GGML_TYPE_BF16);
+    }
 
     ggml_tensor * conv_states = ggml_reshape_3d(ctx0, conv_state_flat, ssm_d_conv - 1, conv_dim, 1);
     ggml_tensor * state       = ggml_reshape_4d(ctx0, ssm_state_flat, head_v_dim, head_v_dim, num_v_heads, 1);
@@ -387,6 +385,10 @@ ggml_tensor * delta_net::build_qkv(ggml_context * ctx0, ggml_tensor * state_stor
     cb(new_conv_states_cont, "new_conv_states_cont", il);
     ggml_tensor * new_conv_flat = ggml_reshape_2d(ctx0, new_conv_states_cont, conv_state_dim, 1);
     ggml_tensor * new_ssm_flat  = ggml_reshape_2d(ctx0, new_state, ssm_state_dim, 1);
+    // Cast BF16 SSM state back to F32 for concat with conv state (ggml_concat requires same type)
+    if (new_ssm_flat->type != GGML_TYPE_F32) {
+        new_ssm_flat = ggml_cast(ctx0, new_ssm_flat, GGML_TYPE_F32);
+    }
     ggml_tensor * new_state_flat = ggml_concat(ctx0, new_conv_flat, new_ssm_flat, 0);
     cb(new_state_flat, "new_state_flat", il);
 
