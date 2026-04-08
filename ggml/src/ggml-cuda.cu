@@ -801,11 +801,32 @@ GGML_CALL ggml_backend_buffer_type_t ggml_backend_cuda_buffer_type(int device) {
                 /* .context  = */ new ggml_backend_cuda_buffer_type_context{i, GGML_CUDA_NAME + std::to_string(i)},
             };
 
-            // Create per-device non-blocking stream for async memory operations.
-            // cudaStreamNonBlocking: this stream does not synchronize with stream 0,
-            // so alloc/free on this stream won't block compute on other streams.
             ggml_cuda_set_device(i);
-            CUDA_CHECK(cudaStreamCreateWithFlags(&ggml_cuda_device_alloc_streams[i], cudaStreamNonBlocking));
+
+            // Check if the device supports stream-ordered memory allocator (CUDA ≥ 11.2).
+            // If not, ggml_cuda_device_alloc_streams[i] stays nullptr and we fall back
+            // to synchronous cudaMalloc/cudaFree everywhere.
+            int mem_pools_supported = 0;
+            cudaDeviceGetAttribute(&mem_pools_supported, cudaDevAttrMemoryPoolsSupported, i);
+            cudaGetLastError(); // clear error on old drivers
+
+            if (mem_pools_supported) {
+                // Create per-device non-blocking stream for async memory operations.
+                // cudaStreamNonBlocking: this stream does not synchronize with stream 0,
+                // so alloc/free on this stream won't block compute on other streams.
+                CUDA_CHECK(cudaStreamCreateWithFlags(&ggml_cuda_device_alloc_streams[i], cudaStreamNonBlocking));
+
+                // Set release threshold to UINT64_MAX on the device's default pool.
+                // This prevents the driver from releasing physical memory back to the
+                // OS on every synchronization — the pool caches aggressively instead.
+                // Applications can reclaim with cudaMemPoolTrimTo() at shutdown.
+                cudaMemPool_t default_pool = nullptr;
+                cudaDeviceGetDefaultMemPool(&default_pool, i);
+                if (default_pool != nullptr) {
+                    cuuint64_t threshold = UINT64_MAX;
+                    cudaMemPoolSetAttribute(default_pool, cudaMemPoolAttrReleaseThreshold, &threshold);
+                }
+            }
         }
         ggml_backend_cuda_buffer_type_initialized = true;
     }
