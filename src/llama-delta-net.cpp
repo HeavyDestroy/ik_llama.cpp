@@ -312,8 +312,15 @@ ggml_tensor * delta_net::build_qkv(ggml_context * ctx0, ggml_tensor * state_stor
         state_f32 = ggml_cast(ctx0, state_f32, GGML_TYPE_F32);
     }
     if (reset_state_local) {
+        // ggml_scale only supports F32 — cast up for reset, then cast back to original type
+        if (state_f32->type != GGML_TYPE_F32) {
+            state_f32 = ggml_cast(ctx0, state_f32, GGML_TYPE_F32);
+        }
         state_f32 = ggml_scale(ctx0, state_f32, 0.0f);
         cb(state_f32, "state_reset", il);
+        if (state_dst->type == GGML_TYPE_BF16) {
+            state_f32 = ggml_cast(ctx0, state_f32, GGML_TYPE_BF16);
+        }
     }
 
     ggml_tensor * conv_state_flat = ggml_view_2d(ctx0, state_f32, conv_state_dim, 1, state_f32->nb[1], 0);
