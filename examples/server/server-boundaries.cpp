@@ -1,8 +1,77 @@
 #include "server-boundaries.h"
 #include <algorithm>
 #include <sstream>
+#include <cctype>
 
 namespace llama_server {
+
+// Levenshtein distance for fuzzy string matching
+int levenshtein_distance(const std::string& s1, const std::string& s2) {
+    int m = s1.length(), n = s2.length();
+    std::vector<std::vector<int>> dp(m + 1, std::vector<int>(n + 1));
+    
+    for (int i = 0; i <= m; i++) dp[i][0] = i;
+    for (int j = 0; j <= n; j++) dp[0][j] = j;
+    
+    for (int i = 1; i <= m; i++) {
+        for (int j = 1; j <= n; j++) {
+            if (s1[i-1] == s2[j-1])
+                dp[i][j] = dp[i-1][j-1];
+            else
+                dp[i][j] = 1 + std::min({dp[i-1][j], dp[i][j-1], dp[i-1][j-1]});
+        }
+    }
+    return dp[m][n];
+}
+
+// Normalize string for comparison
+std::string normalize_name(const std::string& name) {
+    std::string result = name;
+    // Convert to lowercase
+    std::transform(result.begin(), result.end(), result.begin(), ::tolower);
+    // Remove common delimiters and spaces
+    result.erase(std::remove(result.begin(), result.end(), ' '), result.end());
+    result.erase(std::remove(result.begin(), result.end(), '-'), result.end());
+    result.erase(std::remove(result.begin(), result.end(), '_'), result.end());
+    result.erase(std::remove(result.begin(), result.end(), '.'), result.end());
+    return result;
+}
+
+// Fuzzy match with Levenshtein distance threshold
+bool fuzzy_match(const std::string& query, const std::string& target, int max_distance) {
+    std::string nq = normalize_name(query);
+    std::string nt = normalize_name(target);
+    
+    // Exact match after normalization
+    if (nq == nt) return true;
+    
+    // Fuzzy match
+    return levenshtein_distance(nq, nt) <= max_distance;
+}
+
+// Find checkpoint by fuzzy name
+const SemanticBoundary* find_checkpoint_by_name(
+    const std::vector<SemanticBoundary>& boundaries,
+    const std::string& query,
+    int max_distance
+) {
+    // First try exact match
+    for (const auto& b : boundaries) {
+        if (b.content == query || b.file_name == query) {
+            return &b;
+        }
+    }
+    
+    // Then try fuzzy match
+    for (const auto& b : boundaries) {
+        if (fuzzy_match(query, b.content, max_distance) || 
+            fuzzy_match(query, b.file_name, max_distance)) {
+            return &b;
+        }
+    }
+    
+    return nullptr;
+}
 
 SemanticBoundaryDetector::SemanticBoundaryDetector() {
     // Default patterns
@@ -30,7 +99,6 @@ std::vector<SemanticBoundary> SemanticBoundaryDetector::process_token(
     for (size_t i = 0; i < patterns.size(); i++) {
         std::smatch match;
         if (std::regex_search(token_text, match, patterns[i])) {
-            // Find the type for this pattern index
             auto it = pattern_to_type.find(std::to_string(i));
             if (it != pattern_to_type.end()) {
                 BoundaryType type = it->second;

@@ -356,6 +356,9 @@ struct server_prompt_checkpoint {
     // Stored as raw float bytes to avoid JSON serialization overhead
     std::vector<uint8_t> ssm_state_data;  // ~12KB for 64 layers × 48 dims
     size_t ssm_state_size = 0;
+    
+    // Semantic name for fuzzy matching (Phase 3.3)
+    std::string semantic_name;
 
     size_t size() const {
         return data.size() + ssm_state_data.size();
@@ -377,6 +380,7 @@ struct server_prompt_checkpoint {
         j["pos_min_prompt"] = pos_min_prompt;
         j["pos_max_prompt"] = pos_max_prompt;
         j["has_ssm"] = has_ssm_state();
+        j["name"] = semantic_name;
         return j;
     }
 
@@ -385,6 +389,7 @@ struct server_prompt_checkpoint {
         pos_max = j.value<llama_pos>("pos_max", 0);
         pos_min_prompt = j.value<llama_pos>("pos_min_prompt", 0);
         pos_max_prompt = j.value<llama_pos>("pos_max_prompt", 0);
+        semantic_name = j.value<std::string>("name", "");
     }
 };
 
