@@ -2990,6 +2990,54 @@ void server_context::create_checkpoint_at_interval(server_slot & slot, const gpt
     }
 }
 
+// Helper function to find checkpoint by semantic name with fuzzy matching
+static server_prompt_checkpoint* find_checkpoint_by_name(
+    std::vector<server_prompt_checkpoint>& checkpoints,
+    const std::string& query,
+    int max_distance = 3
+) {
+    // Normalize query
+    std::string normalized = query;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(), ::tolower);
+    normalized.erase(std::remove(normalized.begin(), normalized.end(), ' '), normalized.end());
+    normalized.erase(std::remove(normalized.begin(), normalized.end(), '-'), normalized.end());
+    normalized.erase(std::remove(normalized.begin(), normalized.end(), '_'), normalized.end());
+    normalized.erase(std::remove(normalized.begin(), normalized.end(), '.'), normalized.end());
+    
+    // Search checkpoints
+    for (auto& cp : checkpoints) {
+        if (cp.semantic_name.empty()) continue;
+        
+        std::string cp_normalized = cp.semantic_name;
+        std::transform(cp_normalized.begin(), cp_normalized.end(), cp_normalized.begin(), ::tolower);
+        cp_normalized.erase(std::remove(cp_normalized.begin(), cp_normalized.end(), ' '), cp_normalized.end());
+        cp_normalized.erase(std::remove(cp_normalized.begin(), cp_normalized.end(), '-'), cp_normalized.end());
+        cp_normalized.erase(std::remove(cp_normalized.begin(), cp_normalized.end(), '_'), cp_normalized.end());
+        cp_normalized.erase(std::remove(cp_normalized.begin(), cp_normalized.end(), '.'), cp_normalized.end());
+        
+        // Exact match
+        if (cp_normalized == normalized) return &cp;
+        
+        // Fuzzy match using Levenshtein distance
+        int m = normalized.length(), n = cp_normalized.length();
+        std::vector<std::vector<int>> dp(m + 1, std::vector<int>(n + 1));
+        for (int i = 0; i <= m; i++) dp[i][0] = i;
+        for (int j = 0; j <= n; j++) dp[0][j] = j;
+        for (int i = 1; i <= m; i++) {
+            for (int j = 1; j <= n; j++) {
+                if (normalized[i-1] == cp_normalized[j-1])
+                    dp[i][j] = dp[i-1][j-1];
+                else
+                    dp[i][j] = 1 + std::min({dp[i-1][j], dp[i][j-1], dp[i-1][j-1]});
+            }
+        }
+        if (dp[m][n] <= max_distance) {
+            return &cp;
+        }
+    }
+    return nullptr;
+}
+
 void server_context::apply_checkpoint(server_slot & slot) {
     llama_pos pos_next = slot.cache_tokens.pos_next(slot.n_past);
     const bool is_hybrid = llama_model_is_hybrid(model);
@@ -3000,7 +3048,67 @@ void server_context::apply_checkpoint(server_slot & slot) {
         if (pos_min > pos_min_thold) {
             SLT_WRN(slot, "n_past = %d, slot.prompt.tokens.size() = %d, seq_id = %d, pos_min = %d\n", slot.n_past, (int)slot.cache_tokens.size(), slot.id, pos_min);
 
-            // search for a context checkpoint
+            // Check for semantic query in prompt (Phase 3.4)
+            // Look for patterns like "In main.cpp", "In section 3", etc.
+            std::string target_name;
+            bool found_semantic_query = false;
+            
+            // Simple heuristic: check if prompt contains "In " followed by identifier
+            const auto& prompt = slot.prompt.text;
+            size_t pos = prompt.find("In ");
+            if (pos != std::string::npos && pos < prompt.length() - 4) {
+                // Extract word after "In "
+                size_t start = pos + 3;
+                while (start < prompt.length() && std::isspace(prompt[start])) start++;
+                size_t end = start;
+                while (end < prompt.length() && (std::isalnum(prompt[end]) || prompt[end] == '.' || prompt[end] == '-' || prompt[end] == '_')) end++;
+                if (end > start) {
+                    target_name = prompt.substr(start, end - start);
+                    found_semantic_query = true;
+                }
+            }
+            
+            if (found_semantic_query && !target_name.empty()) {
+                // Try to find checkpoint by name
+                auto* cp = find_checkpoint_by_name(slot.server_cached_prompt.checkpoints, target_name);
+                if (cp) {
+                    SLT_WRN(slot, "restoring semantic checkpoint '%s' (pos_min = %d, pos_max = %d)\n", 
+                           target_name.c_str(), cp->pos_min, cp->pos_max);
+                    
+                    // Restore this checkpoint
+                    const int64_t t_start = ggml_time_us();
+                    const size_t checkpoint_size = cp->data.size();
+                    const size_t n = llama_state_seq_set_data(ctx, cp->data.data(), checkpoint_size, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+                    
+                    if (n != checkpoint_size) {
+                        SLT_ERR(slot, "failed to restore context checkpoint (pos_min = %d, pos_max = %d, size = %.3f MiB)\n", cp->pos_min, cp->pos_max, (float)checkpoint_size / 1024 / 1024);
+                    } else {
+                        // Restore SSM state for hybrid models
+                        if (is_hybrid && cp->has_ssm_state()) {
+                            const size_t ssm_restored = llama_state_seq_set_ssm_state(ctx, slot.id,
+                                (const float*)cp->ssm_state_data.data(), cp->ssm_state_size);
+                            
+                            if (ssm_restored != cp->ssm_state_size) {
+                                SLT_ERR(slot, "failed to restore SSM state (expected %zu, got %zu)\n", 
+                                    cp->ssm_state_size, ssm_restored);
+                            } else {
+                                SLT_DBG(slot, "restored SSM state: %zu bytes (%.2f KB)\n",
+                                    ssm_restored, ssm_restored / 1024.0);
+                            }
+                        }
+                        
+                        slot.n_past = std::min(slot.n_past, std::max(cp->pos_min+1, cp->pos_max));
+                        slot.n_past = slot.cache_tokens.size_up_to_pos(slot.n_past-1);
+                        slot.n_past_prompt = std::min(slot.n_past_prompt, std::max(cp->pos_min_prompt+1, cp->pos_max_prompt));
+                        slot.n_past_prompt = slot.prompt_tokens.size_up_to_pos(slot.n_past_prompt-1);
+                        SLT_WRN(slot, "restored semantic checkpoint took %.2f ms (pos_min = %d, pos_max = %d, size = %.3f MiB)\n", 
+                            (ggml_time_us() - t_start) / 1000.0, cp->pos_min, cp->pos_max, (float)(checkpoint_size + cp->ssm_state_data.size()) / 1024 / 1024);
+                        return;  // Done!
+                    }
+                }
+            }
+
+            // search for a context checkpoint (fallback to position-based)
             const auto it = std::find_if(
                 slot.server_cached_prompt.checkpoints.rbegin(),
                 slot.server_cached_prompt.checkpoints.rend(),
@@ -3025,7 +3133,6 @@ void server_context::apply_checkpoint(server_slot & slot) {
                 if (n != checkpoint_size) {
                     SLT_ERR(slot, "failed to restore context checkpoint (pos_min = %d, pos_max = %d, size = %.3f MiB)\n", it->pos_min, it->pos_max, (float)checkpoint_size / 1024 / 1024);
                     do_reset = true;
-                    //printf("[DEBUG] `do_reset` was set to `true` after failing to restore a checkpoint");
                 } else {
                     // Restore SSM state for hybrid models
                     if (is_hybrid && it->has_ssm_state()) {
@@ -3075,6 +3182,7 @@ void server_context::apply_checkpoint(server_slot & slot) {
             }
         }
     }
+}
 }
 
 bool server_context::create_checkpoint(server_slot & slot, const std::string& semantic_name) {
