@@ -3105,8 +3105,7 @@ void server_context::apply_checkpoint(server_slot & slot) {
                         "https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055");
                     slot.n_past = 0;
                     slot.n_past_prompt = 0;
-                }
-            }
+}
         }
     }
 
