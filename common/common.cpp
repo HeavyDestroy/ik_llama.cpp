@@ -2100,6 +2100,20 @@ bool gpt_params_find_arg(int argc, char ** argv, const std::string & arg, gpt_pa
         params.ctx_checkpoints_interval = std::stoi(argv[i]);
         return true;
     }
+    if (arg == "--semantic-checkpoints") {
+        params.semantic_checkpoints = true;
+        return true;
+    }
+    if (arg == "--semantic-boundaries") {
+        CHECK_ARG
+        params.semantic_boundaries = argv[i];
+        return true;
+    }
+    if (arg == "--semantic-max-checkpoints") {
+        CHECK_ARG
+        params.semantic_max_checkpoints = std::stoi(argv[i]);
+        return true;
+    }
     if (arg == "--ctx-checkpoints-tolerance") {
         CHECK_ARG
         params.ctx_checkpoints_tolerance = std::stoi(argv[i]);
@@ -2307,7 +2321,10 @@ void gpt_params_print_usage(int /*argc*/, char ** argv, const gpt_params & param
     options.push_back({ "*",           "-cd,   --ctx-size-draft N",     "size of the prompt context for the draft model (default: %d, 0 = loaded from model)", params.speculative.n_ctx });
 
     options.push_back({ "*",           "--ctx-checkpoints N",           "max number of context checkpoints to create per slot (default: %d)",params.ctx_checkpoints_n});
-    options.push_back({ "*",           "--ctx-checkpoints-interval N",  "minimum number of tokens between each context checkpoint.  (default: %d, <=0 disable)",params.ctx_checkpoints_interval});
+options.push_back({ "*", "--ctx-checkpoints-interval N", "minimum number of tokens between each context checkpoint. (default: %d, <=0 disable)", params.ctx_checkpoints_interval });
+    options.push_back({ "*", "--semantic-checkpoints", "enable semantic checkpointing at file boundaries (```cpp, ```python, ### headers)" });
+    options.push_back({ "*", "--semantic-boundaries PATTERNS", "comma-separated regex patterns for boundaries (default: ```cpp,```python,^#{1,3}\\s+)" });
+    options.push_back({ "*", "--semantic-max-checkpoints N", "max checkpoints for semantic mode (default: %d)", params.semantic_max_checkpoints });
     options.push_back({ "*",           "--ctx-checkpoints-tolerance N", "the number of tokens before the full prompt to create the checkpoint.  (default: %d, <=0 disable)",params.ctx_checkpoints_tolerance});
     options.push_back({ "*",           "-cram, --cache-ram N",          "set the maximum cache size in MiB (default: %d, -1 - no limit, 0 - disable)",params.cache_ram_mib });
     options.push_back({ "*",           "-crs,  --cache-ram-similarity N",           "max of similarity of prompt tokens to cache tokens that triggers prompt cache (default: %.2f).",params.cache_ram_similarity });
