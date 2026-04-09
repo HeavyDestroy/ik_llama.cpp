@@ -1,0 +1,122 @@
+*** Begin Patch
+*** Update File: examples/server/server-context.cpp
+@@ context hint: includes @@
+ #include "llama.h"
+ #include "common.h"
++#include "server-semantic-checkpoint.h"
+ #include <cstring>
+ #include <random>
+ #include <queue>
+@@ context hint: server_context struct @@
+ struct server_context {
+     // ... existing fields ...
+     
++    // Semantic checkpointing
++    bool semantic_checkpoints_enabled = false;
++    llama_server::semantic_config semantic_cfg;
++    std::unique_ptr<llama_server::semantic_checkpoint_manager> semantic_manager;
++    
+     // ... rest of struct ...
+ };
+@@ context hint: server_params struct @@
+ struct server_params {
+     // ... existing fields ...
++    bool semantic_checkpoints = false;
++    std::string semantic_boundaries;  // Comma-separated regex patterns
++    int32_t semantic_max_checkpoints = 100;
+     // ... rest of struct ...
+ };
+@@ context hint: parse_params function @@
+ bool parse_params(int argc, char **argv, server_params & params) {
+     // ... existing parsing ...
+     
++    // New flags
++    if (check_arg(argc, argv, i, "--semantic-checkpoints")) {
++        params.semantic_checkpoints = true;
++        ++i;
++    }
++    if (check_arg(argc, argv, i, "--semantic-boundaries")) {
++        params.semantic_boundaries = argv[++i];
++        ++i;
++    }
++    if (check_arg(argc, argv, i, "--semantic-max-checkpoints")) {
++        params.semantic_max_checkpoints = std::stoi(argv[++i]);
++        ++i;
++    }
++    
+     // ... rest of parsing ...
+ }
+@@ context hint: server_context constructor @@
+ server_context::server_context(const server_params & params, std::function<void(const std::string &, bool)> callback)
+     : params_base(params), params_embedding(params), params_logit_bias(params), 
+       params_anti_prompt(params), params_slots(params), params_base(params),
+       // ... existing init ...
+ {
++    // Initialize semantic checkpointing
++    if (params.semantic_checkpoints) {
++        semantic_checkpoints_enabled = true;
++        semantic_cfg.max_checkpoints = params.semantic_max_checkpoints;
++        if (!params.semantic_boundaries.empty()) {
++            // Parse comma-separated patterns
++            std::stringstream ss(params.semantic_boundaries);
++            std::string pattern;
++            while (std::getline(ss, pattern, ',')) {
++                semantic_cfg.boundary_patterns.push_back(pattern);
++            }
++        }
++        semantic_manager = std::make_unique<llama_server::semantic_checkpoint_manager>(semantic_cfg);
++    }
+ }
+@@ context hint: create_checkpoint function @@
+ bool server_context::create_checkpoint(server_slot & slot) {
+     // ... existing code up to do_checkpoint logic ...
+     
+     if (do_checkpoint) {
++        // Semantic checkpointing: check if we're at a boundary
++        if (semantic_checkpoints_enabled) {
++            // Extract content type and name from recent tokens (simplified)
++            // In reality, this should parse the token stream
++            std::string semantic_name = "section_" + std::to_string(slot.n_past);
++            std::string content_type = "text";
++            
++            // Create checkpoint with semantic metadata
++            // Note: SSM state extraction requires access to model internals
++            semantic_manager->add_checkpoint(
++                ctx, slot.id, pos_min, pos_max,
++                semantic_name, content_type,
++                checkpoint_data, {}, {}, {}  // SSM state extraction TODO
++            );
++        }
++        
+         const int64_t t_start = ggml_time_us();
+         // ... existing checkpoint creation ...
+     }
+ }
+@@ context hint: slot_process or apply_checkpoint @@
+ void server_context::slot_process(server_slot & slot, const slot_element & elem) {
++    // Check for semantic retrieval trigger before processing
++    if (semantic_checkpoints_enabled && !elem.prompt.empty()) {
++        std::string target_name;
++        if (semantic_manager->check_trigger(elem.prompt, target_name)) {
++            // Trigger detected! Restore checkpoint.
++            int32_t restore_pos = 0;
++            std::vector<char> restore_data;
++            if (semantic_manager->restore_checkpoint(ctx, slot.id, target_name, restore_pos, restore_data)) {
++                // Restore KV cache
++                llama_state_seq_set_data(ctx, restore_data.data(), restore_data.size(), slot.id, 
++                                        LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
++                slot.n_past = restore_pos;
++                slot.n_past_prompt = restore_pos;
++                
++                // Log the restoration
++                SLT_INF(slot, "Restored semantic checkpoint '%s' at position %d\n", 
++                        target_name.c_str(), restore_pos);
++            } else {
++                SLT_WRN(slot, "Semantic checkpoint '%s' not found\n", target_name.c_str());
++            }
++        }
++    }
++    
+     // ... rest of processing ...
+ }
+*** End Patch
