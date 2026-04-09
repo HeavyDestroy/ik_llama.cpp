@@ -1,6 +1,6 @@
 # Phase 2.5: Actual Boundary Detection - Complete
 
-**Date:** 2026-04-09 5:30 PM GMT+8  
+**Date:** 2026-04-09 5:45 PM GMT+8  
 **Status:** ✅ Phase 2.5 Complete - True Semantic Checkpointing
 
 ## What Was Implemented
@@ -38,10 +38,10 @@ if (last_boundary.type == CODE_BLOCK_END ||
 - `Section_3` for markdown headers
 - `main.cpp` for XML file tags
 
-### 4. Build Fix
+### 4. Bug Fixes
 
-**Problem:** `server-boundaries.cpp` wasn't compiled
-**Fix:** Added to `CMakeLists.txt` `TARGET_SRCS`
+**Problem:** `std::regex` doesn't have `.str()` method
+**Fix:** Use index-based lookup (`std::to_string(i)`) instead of pattern string
 
 ### 5. Current State
 
@@ -75,9 +75,9 @@ if (last_boundary.type == CODE_BLOCK_END ||
 **Expected Output:**
 ```
 slot 0: detected semantic boundary: cpp_block at pos 500
-slot 0: created context checkpoint 1 of 100 (pos_min = 0, pos_max = 500, name = cpp_block, ...)
+slot 0: created context checkpoint 1 of 100 (pos_min = 0, pos_max = 500, name = cpp_block, size = 5.012 MiB)
 slot 0: detected semantic boundary: python_block at pos 1200
-slot 0: created context checkpoint 2 of 100 (pos_min = 501, pos_max = 1200, name = python_block, ...)
+slot 0: created context checkpoint 2 of 100 (pos_min = 501, pos_max = 1200, name = python_block, size = 5.012 MiB)
 ```
 
 ## Summary
