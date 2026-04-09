@@ -1,66 +1,47 @@
-# Phase 3.4: Checkpoint Lookup Integration - Complete
+# Phase 3.4: Checkpoint Lookup Integration - Partially Complete
 
-**Date:** 2026-04-09 8:15 PM GMT+8  
-**Status:** ✅ Phase 3.4 Complete - Semantic Query Detection & Fuzzy Restoration
+**Date:** 2026-04-09 8:30 PM GMT+8  
+**Status:** ⚠️ Partially Complete - Fuzzy matching available, semantic query detection deferred
 
 ## What Was Implemented
 
-### 1. Semantic Query Detection
+### 1. Fuzzy Matching Function (Available)
 
-**Location:** `server_context::apply_checkpoint()` (line 2993)
-
-**Algorithm:**
-```cpp
-// Detect "In main.cpp" style queries
-const auto& prompt = slot.prompt.text;
-size_t pos = prompt.find("In ");
-if (pos != std::string::npos) {
-    // Extract word after "In "
-    target_name = extract_identifier(prompt, pos + 3);
-}
-```
-
-### 2. Fuzzy Checkpoint Lookup
-
-**Location:** Static helper `find_checkpoint_by_name()` (line 2957)
+**Location:** Static helper `find_checkpoint_by_name()` (line 2993)
 
 **Features:**
 - Normalizes names (lowercase, removes spaces/punctuation)
 - Levenshtein distance calculation (threshold 3)
-- Exact match first, then fuzzy
+- Works with `std::list<server_prompt_checkpoint>`
 - Returns pointer to checkpoint or nullptr
 
-### 3. Integration
+### 2. Deferred: Semantic Query Detection
 
-**Flow:**
-1. Check if prompt contains "In <name>" pattern
-2. Extract target name (e.g., "main.cpp")
-3. Search checkpoints by name (exact or fuzzy)
-4. If found: restore checkpoint and return immediately
-5. If not found: fallback to position-based checkpointing
+**Reason:** Requires access to prompt text which is not easily available in `apply_checkpoint()` (tokens are stored as `server_tokens`, not raw string).
 
-### 4. Current State
+**Future Implementation:**
+- Add prompt text tracking to `server_slot`
+- Detect "In main.cpp" patterns in prompt
+- Call `find_checkpoint_by_name()` to restore by name
+
+### 3. Current State
 
 **Working:**
-- ✅ Semantic query detection ("In main.cpp")
-- ✅ Fuzzy matching (Levenshtein distance ≤ 3)
-- ✅ Checkpoint restoration by name
-- ✅ SSM state preserved during semantic restoration
-- ✅ Fallback to position-based if name not found
+- ✅ Fuzzy matching function available (`find_checkpoint_by_name`)
+- ✅ Checkpoint names stored in structs
+- ✅ Levenshtein distance calculation
 - ✅ Compilation successful (9.0MB binary)
 
-**Testing:**
-```bash
-./build/bin/llama-server -m model.gguf \
-  --semantic-checkpoints \
-  --ctx-checkpoints-interval 1000 \
-  --semantic-max-checkpoints 100
+**Not Working:**
+- ❌ Automatic semantic query detection ("In main.cpp" → restore)
+- ❌ Integration into `apply_checkpoint()` (function exists but not called)
 
-# Query: "In main-cpp, what's the bug?"
-# Expected: Finds "main.cpp" checkpoint (distance 1), restores it
-# Query: "In Section-3, what did we say?"
-# Expected: Finds "Section_3" checkpoint (distance 1), restores it
-```
+## How to Use (Manual)
+
+The fuzzy matching function is available but not integrated. To use it, you would need to:
+1. Add a CLI command or API endpoint that accepts a checkpoint name
+2. Call `find_checkpoint_by_name(slot.server_cached_prompt.checkpoints, "main-cpp")`
+3. Restore the returned checkpoint
 
 ## Summary
 
@@ -68,7 +49,7 @@ if (pos != std::string::npos) {
 **Phase 2:** ✅ Complete (Semantic checkpointing infrastructure)  
 **Phase 2.5:** ✅ Complete (Actual boundary detection)  
 **Phase 3.3:** ✅ Complete (Fuzzy matching)  
-**Phase 3.4:** ✅ Complete (Integration)  
+**Phase 3.4:** ⚠️ Partial (Fuzzy matching available, integration deferred)  
 **Phase 4:** ⏳ Next (Disk storage for 256k context)
 
-*tail flicks* Full semantic checkpointing is now operational! Phase 4 (disk storage) is next for true 256k support.
+*tail flicks* The fuzzy matching is ready, just needs integration! Phase 4 (disk storage) is next.
