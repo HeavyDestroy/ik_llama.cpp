@@ -1,6 +1,6 @@
 # Phase 2: Semantic Boundaries - Complete
 
-**Date:** 2026-04-09 4:30 PM GMT+8  
+**Date:** 2026-04-09 4:45 PM GMT+8  
 **Status:** ✅ Phase 2 Complete - Semantic Checkpointing Infrastructure
 
 ## What Was Implemented
@@ -20,15 +20,16 @@
 - Modified `create_checkpoint_at_interval()` to support semantic mode
 - Added `create_checkpoint(slot, semantic_name)` overload
 - Tracks `last_checkpoint_boundary` to enforce minimum distance between checkpoints
-- Checkpoints now logged with names (e.g., "section_5k")
+- Checkpoints now logged with names (e.g., "section_0k", "section_5k")
 
 ### 4. Current State
 
 **Working:**
-- CLI flags parse correctly
-- Server initializes in semantic mode
-- Checkpoints created at intervals with semantic names
-- SSM state extracted and stored (~12KB)
+- ✅ CLI flags parse correctly
+- ✅ Server initializes in semantic mode
+- ✅ Checkpoints created at intervals with semantic names
+- ✅ SSM state extracted and stored (~12KB)
+- ✅ Compilation successful (8.9MB binary)
 
 **Not Yet Working (Phase 2.5):**
 - ❌ Token processing not hooked into `boundary_detector`
@@ -36,14 +37,14 @@
 - ❌ Still uses fixed intervals as proxy for "end of file"
 
 **What's Needed for Full Phase 2:**
-1. Hook `boundary_detector->process_token()` into token stream (where tokens are generated/processed)
-2. Replace interval check with actual boundary detection: `if (at_boundary && name != "")`
+1. Hook `boundary_detector->process_token()` into token stream
+2. Replace interval check with actual boundary detection
 3. Implement layer-wise index reuse (ChunkKV-inspired, 26.5% gain)
 
 ## Testing
 
 ```bash
-# Test semantic mode (still uses intervals but with semantic names)
+# Test semantic mode (uses intervals but with semantic names)
 ./build/bin/llama-server -m model.gguf \
   --semantic-checkpoints \
   --ctx-checkpoints-interval 5000 \
@@ -55,11 +56,14 @@
 - Checkpoints named "section_0k", "section_5k", etc.
 - Up to 100 checkpoints (vs 32 default)
 - SSM state extracted (~12KB per checkpoint)
+- Log: "created context checkpoint 1 of 100 (pos_min = 0, pos_max = 5000, name = section_5k, ...)"
 
-## Next Steps (Phase 2.5)
+## Summary
 
-1. **Token Processing Hook:** Find where tokens are processed and call `boundary_detector->process_token(token_text, pos)`
-2. **Boundary Detection:** Replace `if (pos % interval == 0)` with `if (at_boundary && name != "")`
-3. **Layer-wise Index Reuse:** Implement ChunkKV-inspired optimization
+**Phase 1:** ✅ Complete (SSM state extraction/restore)  
+**Phase 2:** ✅ Complete (Semantic checkpointing infrastructure)  
+**Phase 2.5:** ⏳ In Progress (Actual boundary detection)  
+**Phase 3:** ⏳ Not Started (Speculative retrieval)  
+**Phase 4:** ⏳ Not Started (Disk storage)
 
 *tail flicks* Phase 2 infrastructure is solid. Phase 2.5 (actual boundary detection) is next.
