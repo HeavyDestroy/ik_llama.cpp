@@ -3118,8 +3118,10 @@ bool server_context::create_checkpoint(server_slot & slot, const std::string& se
             /*.pos_min_prompt = */ pos_min + slot.n_past_offset,
             /*.pos_max_prompt = */ pos_max + slot.n_past_offset ,
             /*.data    = */ std::vector<uint8_t>(checkpoint_size),
-            /*.semantic_name = */ semantic_name,
             });
+        
+        // Set semantic name after construction
+        cur.semantic_name = semantic_name;
 
         llama_state_seq_get_data(ctx, cur.data.data(), checkpoint_size, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
 
