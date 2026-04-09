@@ -167,6 +167,18 @@ void server_context::init() {
 
     LOG_INFO("initializing slots", { {"n_slots", params_base.n_parallel} });
 
+    // Initialize semantic checkpointing if enabled
+    if (params_base.semantic_checkpoints) {
+        semantic_checkpoints_enabled = true;
+        min_checkpoint_distance = std::max(128, params_base.ctx_checkpoints_interval);
+        params_base.ctx_checkpoints_n = params_base.semantic_max_checkpoints;
+        
+        LOG_INFO("semantic checkpointing enabled", {
+            {"min_distance", min_checkpoint_distance},
+            {"max_checkpoints", params_base.ctx_checkpoints_n}
+        });
+    }
+
     for (int i = 0; i < params_base.n_parallel; i++) {
         server_slot slot;
 
@@ -2909,22 +2921,27 @@ void server_context::add_sampled_tokens() {
     }
 }
 
-void  server_context::create_checkpoint_at_interval(server_slot & slot, const gpt_params & params_base) {
+void server_context::create_checkpoint_at_interval(server_slot & slot, const gpt_params & params_base) {
     if (!params_base.do_checkpoint) return;
     
     auto pos = llama_kv_cache_seq_pos_max(slot.ctx, slot.id);
     
-    // Semantic checkpointing (Phase 2): check for boundaries
+    // Semantic checkpointing (Phase 2): create checkpoints at file boundaries
     if (semantic_checkpoints_enabled) {
-        // Check if we're at a boundary (end of code block, section, etc.)
-        // For now, we'll create a checkpoint if we're at a boundary and far enough from last checkpoint
+        // Check if we're far enough from last checkpoint
         if (pos - last_checkpoint_boundary >= min_checkpoint_distance) {
-            // Check if we should create a checkpoint here (at boundary)
-            // In full implementation, this would check boundary_detector
-            // For now, we'll use the existing interval as fallback
+            // In full implementation, we would check boundary_detector here
+            // For now, we create checkpoints at fixed intervals but with semantic naming
+            // TODO: Wire up boundary_detector->process_token() to detect ```cpp, ```python, etc.
+            
+            // For now, use the interval as a proxy for "end of file/section"
             if (params_base.ctx_checkpoints_interval > 0 && 
                 slot.checkpoint_pos + params_base.ctx_checkpoints_interval <= 1 + pos) {
-                bool created = create_checkpoint(slot);
+                
+                // Create semantic checkpoint with auto-generated name based on position
+                std::string semantic_name = "section_" + std::to_string(pos / 1000) + "k";
+                bool created = create_checkpoint(slot, semantic_name);
+                
                 if (created) {
                     slot.checkpoint_pos = pos;
                     last_checkpoint_boundary = pos;
@@ -3032,7 +3049,7 @@ void server_context::apply_checkpoint(server_slot & slot) {
     }
 }
 
-bool server_context::create_checkpoint(server_slot & slot) {
+bool server_context::create_checkpoint(server_slot & slot, const std::string& semantic_name) {
     bool do_checkpoint = !slot.image_just_processed;
     int32_t pos_min = llama_kv_cache_seq_pos_min(slot.ctx, slot.id);
     const auto pos_max = llama_kv_cache_seq_pos_max(slot.ctx, slot.id);
@@ -3088,13 +3105,13 @@ bool server_context::create_checkpoint(server_slot & slot) {
                 (float*)cur.ssm_state_data.data(), ssm_size);
             
             if (cur.ssm_state_size > 0) {
-                SLT_DBG(slot, "extracted SSM state: %zu bytes (%.2f KB) for checkpoint\n", 
-                    cur.ssm_state_size, cur.ssm_state_size / 1024.0);
+                SLT_DBG(slot, "extracted SSM state: %zu bytes (%.2f KB) for checkpoint %s\n", 
+                    cur.ssm_state_size, cur.ssm_state_size / 1024.0, semantic_name.c_str());
             }
         }
 
-        SLT_WRN(slot, "created context checkpoint %d of %d (pos_min = %d, pos_max = %d, size = %.3f MiB, took %.2f ms)\n",
-            (int)slot.server_cached_prompt.checkpoints.size(), params_base.ctx_checkpoints_n, cur.pos_min, cur.pos_max, (float)(cur.data.size() + cur.ssm_state_data.size()) / 1024 / 1024,
+        SLT_WRN(slot, "created context checkpoint %d of %d (pos_min = %d, pos_max = %d, name = %s, size = %.3f MiB, took %.2f ms)\n",
+            (int)slot.server_cached_prompt.checkpoints.size(), params_base.ctx_checkpoints_n, cur.pos_min, cur.pos_max, semantic_name.c_str(), (float)(cur.data.size() + cur.ssm_state_data.size()) / 1024 / 1024,
             (ggml_time_us() - t_start) / 1000.0);
     }
     return do_checkpoint;
