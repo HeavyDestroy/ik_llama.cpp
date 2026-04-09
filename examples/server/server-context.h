@@ -2,6 +2,7 @@
 #include "server-queue.h"
 #include "speculative.h"
 #include "json-schema-to-grammar.h"
+#include "server-boundaries.h"
 #include <nlohmann/json_fwd.hpp>
 
 #include <cstddef>
