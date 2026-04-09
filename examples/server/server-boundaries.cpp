@@ -14,8 +14,9 @@ SemanticBoundaryDetector::SemanticBoundaryDetector() {
 }
 
 void SemanticBoundaryDetector::add_pattern(const std::string& pattern, BoundaryType type) {
+    int idx = patterns.size();
     patterns.push_back(std::regex(pattern));
-    pattern_to_type[pattern] = type;
+    pattern_to_type[std::to_string(idx)] = type;
 }
 
 std::vector<SemanticBoundary> SemanticBoundaryDetector::process_token(
@@ -29,7 +30,8 @@ std::vector<SemanticBoundary> SemanticBoundaryDetector::process_token(
     for (size_t i = 0; i < patterns.size(); i++) {
         std::smatch match;
         if (std::regex_search(token_text, match, patterns[i])) {
-            auto it = pattern_to_type.find(patterns[i].str());
+            // Find the type for this pattern index
+            auto it = pattern_to_type.find(std::to_string(i));
             if (it != pattern_to_type.end()) {
                 BoundaryType type = it->second;
                 std::string content = (match.size() > 1) ? match[1].str() : "";
