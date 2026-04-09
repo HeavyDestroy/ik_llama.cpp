@@ -2,6 +2,7 @@
 #include "server-common.h"
 #include "server-task.h"
 #include "server-queue.h"
+#include "server-boundaries.h"
 
 #include "common.h"
 #include "llama.h"

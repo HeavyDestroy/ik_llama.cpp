@@ -266,6 +266,13 @@ struct server_context {
     int32_t cache_ram_n_min = 0;
     float cache_ram_similarity = 0.5f;
 
+    // Semantic checkpointing (Phase 2)
+    bool semantic_checkpoints_enabled = false;
+    std::unique_ptr<llama_server::SemanticBoundaryDetector> boundary_detector;
+    std::vector<llama_server::SemanticBoundary> current_boundaries;
+    int32_t last_checkpoint_boundary = -1;
+    int32_t min_checkpoint_distance = 128;  // Minimum tokens between checkpoints
+
     ~server_context();
 
     bool load_model(const gpt_params& params_);
