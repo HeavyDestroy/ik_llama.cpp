@@ -374,7 +374,7 @@ struct server_context {
     // Re-aggregates all active vectors and updates the model state
     bool apply_control_vectors_internal();
 
-    bool create_checkpoint(server_slot & slot);
+    bool create_checkpoint(server_slot & slot, const std::string& semantic_name = "");
 
     void apply_checkpoint(server_slot & slot);
 
