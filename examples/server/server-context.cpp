@@ -2992,7 +2992,7 @@ void server_context::create_checkpoint_at_interval(server_slot & slot, const gpt
 
 // Helper function to find checkpoint by semantic name with fuzzy matching
 static server_prompt_checkpoint* find_checkpoint_by_name(
-    std::vector<server_prompt_checkpoint>& checkpoints,
+    std::list<server_prompt_checkpoint>& checkpoints,
     const std::string& query,
     int max_distance = 3
 ) {
@@ -3048,67 +3048,7 @@ void server_context::apply_checkpoint(server_slot & slot) {
         if (pos_min > pos_min_thold) {
             SLT_WRN(slot, "n_past = %d, slot.prompt.tokens.size() = %d, seq_id = %d, pos_min = %d\n", slot.n_past, (int)slot.cache_tokens.size(), slot.id, pos_min);
 
-            // Check for semantic query in prompt (Phase 3.4)
-            // Look for patterns like "In main.cpp", "In section 3", etc.
-            std::string target_name;
-            bool found_semantic_query = false;
-            
-            // Simple heuristic: check if prompt contains "In " followed by identifier
-            const auto& prompt = slot.prompt.text;
-            size_t pos = prompt.find("In ");
-            if (pos != std::string::npos && pos < prompt.length() - 4) {
-                // Extract word after "In "
-                size_t start = pos + 3;
-                while (start < prompt.length() && std::isspace(prompt[start])) start++;
-                size_t end = start;
-                while (end < prompt.length() && (std::isalnum(prompt[end]) || prompt[end] == '.' || prompt[end] == '-' || prompt[end] == '_')) end++;
-                if (end > start) {
-                    target_name = prompt.substr(start, end - start);
-                    found_semantic_query = true;
-                }
-            }
-            
-            if (found_semantic_query && !target_name.empty()) {
-                // Try to find checkpoint by name
-                auto* cp = find_checkpoint_by_name(slot.server_cached_prompt.checkpoints, target_name);
-                if (cp) {
-                    SLT_WRN(slot, "restoring semantic checkpoint '%s' (pos_min = %d, pos_max = %d)\n", 
-                           target_name.c_str(), cp->pos_min, cp->pos_max);
-                    
-                    // Restore this checkpoint
-                    const int64_t t_start = ggml_time_us();
-                    const size_t checkpoint_size = cp->data.size();
-                    const size_t n = llama_state_seq_set_data(ctx, cp->data.data(), checkpoint_size, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-                    
-                    if (n != checkpoint_size) {
-                        SLT_ERR(slot, "failed to restore context checkpoint (pos_min = %d, pos_max = %d, size = %.3f MiB)\n", cp->pos_min, cp->pos_max, (float)checkpoint_size / 1024 / 1024);
-                    } else {
-                        // Restore SSM state for hybrid models
-                        if (is_hybrid && cp->has_ssm_state()) {
-                            const size_t ssm_restored = llama_state_seq_set_ssm_state(ctx, slot.id,
-                                (const float*)cp->ssm_state_data.data(), cp->ssm_state_size);
-                            
-                            if (ssm_restored != cp->ssm_state_size) {
-                                SLT_ERR(slot, "failed to restore SSM state (expected %zu, got %zu)\n", 
-                                    cp->ssm_state_size, ssm_restored);
-                            } else {
-                                SLT_DBG(slot, "restored SSM state: %zu bytes (%.2f KB)\n",
-                                    ssm_restored, ssm_restored / 1024.0);
-                            }
-                        }
-                        
-                        slot.n_past = std::min(slot.n_past, std::max(cp->pos_min+1, cp->pos_max));
-                        slot.n_past = slot.cache_tokens.size_up_to_pos(slot.n_past-1);
-                        slot.n_past_prompt = std::min(slot.n_past_prompt, std::max(cp->pos_min_prompt+1, cp->pos_max_prompt));
-                        slot.n_past_prompt = slot.prompt_tokens.size_up_to_pos(slot.n_past_prompt-1);
-                        SLT_WRN(slot, "restored semantic checkpoint took %.2f ms (pos_min = %d, pos_max = %d, size = %.3f MiB)\n", 
-                            (ggml_time_us() - t_start) / 1000.0, cp->pos_min, cp->pos_max, (float)(checkpoint_size + cp->ssm_state_data.size()) / 1024 / 1024);
-                        return;  // Done!
-                    }
-                }
-            }
-
-            // search for a context checkpoint (fallback to position-based)
+            // search for a context checkpoint
             const auto it = std::find_if(
                 slot.server_cached_prompt.checkpoints.rbegin(),
                 slot.server_cached_prompt.checkpoints.rend(),
