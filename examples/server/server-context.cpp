@@ -2910,8 +2910,32 @@ void server_context::add_sampled_tokens() {
 }
 
 void  server_context::create_checkpoint_at_interval(server_slot & slot, const gpt_params & params_base) {
-    if (params_base.do_checkpoint && params_base.ctx_checkpoints_interval > 0) {
-        auto pos = llama_kv_cache_seq_pos_max(slot.ctx, slot.id);
+    if (!params_base.do_checkpoint) return;
+    
+    auto pos = llama_kv_cache_seq_pos_max(slot.ctx, slot.id);
+    
+    // Semantic checkpointing (Phase 2): check for boundaries
+    if (semantic_checkpoints_enabled) {
+        // Check if we're at a boundary (end of code block, section, etc.)
+        // For now, we'll create a checkpoint if we're at a boundary and far enough from last checkpoint
+        if (pos - last_checkpoint_boundary >= min_checkpoint_distance) {
+            // Check if we should create a checkpoint here (at boundary)
+            // In full implementation, this would check boundary_detector
+            // For now, we'll use the existing interval as fallback
+            if (params_base.ctx_checkpoints_interval > 0 && 
+                slot.checkpoint_pos + params_base.ctx_checkpoints_interval <= 1 + pos) {
+                bool created = create_checkpoint(slot);
+                if (created) {
+                    slot.checkpoint_pos = pos;
+                    last_checkpoint_boundary = pos;
+                }
+            }
+        }
+        return;
+    }
+    
+    // Legacy: fixed interval checkpointing
+    if (params_base.ctx_checkpoints_interval > 0) {
         if (slot.checkpoint_pos + params_base.ctx_checkpoints_interval <= 1 + pos) {
             bool created = create_checkpoint(slot);
             if (created) {
