@@ -2957,11 +2957,25 @@ void server_context::apply_checkpoint(server_slot & slot) {
                     do_reset = true;
                     //printf("[DEBUG] `do_reset` was set to `true` after failing to restore a checkpoint");
                 } else {
+                    // Restore SSM state for hybrid models
+                    if (is_hybrid && it->has_ssm_state()) {
+                        const size_t ssm_restored = llama_state_seq_set_ssm_state(ctx, slot.id,
+                            (const float*)it->ssm_state_data.data(), it->ssm_state_size);
+                        
+                        if (ssm_restored != it->ssm_state_size) {
+                            SLT_ERR(slot, "failed to restore SSM state (expected %zu, got %zu)\n", 
+                                it->ssm_state_size, ssm_restored);
+                        } else {
+                            SLT_DBG(slot, "restored SSM state: %zu bytes (%.2f KB)\n",
+                                ssm_restored, ssm_restored / 1024.0);
+                        }
+                    }
+                    
                     slot.n_past = std::min(slot.n_past, std::max(it->pos_min+1, it->pos_max));
                     slot.n_past = slot.cache_tokens.size_up_to_pos(slot.n_past-1);
                     slot.n_past_prompt = std::min(slot.n_past_prompt, std::max(it->pos_min_prompt+1, it->pos_max_prompt));
                     slot.n_past_prompt = slot.prompt_tokens.size_up_to_pos(slot.n_past_prompt-1);
-                    SLT_WRN(slot, "restored context checkpoint took  %.2f ms (pos_min = %d, pos_max = %d, size = %.3f MiB)\n", (ggml_time_us() - t_start) / 1000.0, it->pos_min, it->pos_max, (float)checkpoint_size / 1024 / 1024);
+                    SLT_WRN(slot, "restored context checkpoint took  %.2f ms (pos_min = %d, pos_max = %d, size = %.3f MiB)\n", (ggml_time_us() - t_start) / 1000.0, it->pos_min, it->pos_max, (float)(checkpoint_size + it->ssm_state_data.size()) / 1024 / 1024);
                 }
             }
 
@@ -3038,8 +3052,24 @@ bool server_context::create_checkpoint(server_slot & slot) {
 
         llama_state_seq_get_data(ctx, cur.data.data(), checkpoint_size, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
 
+        // Extract SSM state for hybrid models (Qwen 3.5)
+        if (is_hybrid) {
+            const int n_layers = llama_n_layer(model);
+            const int state_dim = 48;  // Qwen 3.5 state dimension
+            size_t ssm_size = n_layers * state_dim * sizeof(float);
+            
+            cur.ssm_state_data.resize(ssm_size);
+            cur.ssm_state_size = llama_state_seq_get_ssm_state(ctx, slot.id, 
+                (float*)cur.ssm_state_data.data(), ssm_size);
+            
+            if (cur.ssm_state_size > 0) {
+                SLT_DBG(slot, "extracted SSM state: %zu bytes (%.2f KB) for checkpoint\n", 
+                    cur.ssm_state_size, cur.ssm_state_size / 1024.0);
+            }
+        }
+
         SLT_WRN(slot, "created context checkpoint %d of %d (pos_min = %d, pos_max = %d, size = %.3f MiB, took %.2f ms)\n",
-            (int)slot.server_cached_prompt.checkpoints.size(), params_base.ctx_checkpoints_n, cur.pos_min, cur.pos_max, (float)cur.data.size() / 1024 / 1024,
+            (int)slot.server_cached_prompt.checkpoints.size(), params_base.ctx_checkpoints_n, cur.pos_min, cur.pos_max, (float)(cur.data.size() + cur.ssm_state_data.size()) / 1024 / 1024,
             (ggml_time_us() - t_start) / 1000.0);
     }
     return do_checkpoint;

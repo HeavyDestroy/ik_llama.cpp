@@ -351,9 +351,23 @@ struct server_prompt_checkpoint {
     llama_pos pos_max_prompt;
 
     std::vector<uint8_t> data;
+    
+    // SSM state for hybrid models (Qwen 3.5)
+    // Stored as raw float bytes to avoid JSON serialization overhead
+    std::vector<uint8_t> ssm_state_data;  // ~12KB for 64 layers × 48 dims
+    size_t ssm_state_size = 0;
 
     size_t size() const {
-        return data.size();
+        return data.size() + ssm_state_data.size();
+    }
+    
+    bool has_ssm_state() const {
+        return ssm_state_size > 0;
+    }
+    
+    // SSM state size in floats
+    size_t ssm_state_n_floats() const {
+        return ssm_state_size / sizeof(float);
     }
 
     json to_json() {
@@ -362,6 +376,7 @@ struct server_prompt_checkpoint {
         j["pos_max"] = pos_max;
         j["pos_min_prompt"] = pos_min_prompt;
         j["pos_max_prompt"] = pos_max_prompt;
+        j["has_ssm"] = has_ssm_state();
         return j;
     }
 
