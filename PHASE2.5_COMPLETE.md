@@ -1,6 +1,6 @@
 # Phase 2.5: Actual Boundary Detection - Complete
 
-**Date:** 2026-04-09 5:15 PM GMT+8  
+**Date:** 2026-04-09 5:30 PM GMT+8  
 **Status:** ✅ Phase 2.5 Complete - True Semantic Checkpointing
 
 ## What Was Implemented
@@ -38,7 +38,12 @@ if (last_boundary.type == CODE_BLOCK_END ||
 - `Section_3` for markdown headers
 - `main.cpp` for XML file tags
 
-### 4. Current State
+### 4. Build Fix
+
+**Problem:** `server-boundaries.cpp` wasn't compiled
+**Fix:** Added to `CMakeLists.txt` `TARGET_SRCS`
+
+### 5. Current State
 
 **Working:**
 - ✅ Token stream hooked into boundary detector
@@ -46,6 +51,7 @@ if (last_boundary.type == CODE_BLOCK_END ||
 - ✅ Creates checkpoints at file/section boundaries
 - ✅ Enforces minimum distance between checkpoints
 - ✅ Logs boundary detections with names
+- ✅ Compilation successful (8.9MB binary)
 
 **Not Yet Working:**
 - ❌ Layer-wise index reuse (ChunkKV-inspired) - Phase 3
