@@ -21,6 +21,8 @@ set(TARGET_SRCS
     server-common.h
     server-context.cpp
     server-context.h
+    server-boundaries.cpp
+    server-boundaries.h
 )
 set(PUBLIC_ASSETS
     index.html.gz
