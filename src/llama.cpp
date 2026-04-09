@@ -7605,9 +7605,10 @@ size_t llama_state_seq_get_ssm_state(struct llama_context * ctx, llama_seq_id se
     
     size_t total_size = 0;
     size_t offset = 0;
+    const int n_layer = ctx->model.hparams.n_layer;
     
     // Iterate over all layers to extract recurrent state
-    for (int i = 0; i < cache.n_layer; i++) {
+    for (int i = 0; i < n_layer; i++) {
         if (cache.s_l[i] != nullptr) {
             // cache.s_l[i] has shape [state_dim, qnext_state_slots]
             // We extract state_dim floats for the given seq_id
@@ -7654,8 +7655,9 @@ size_t llama_state_seq_set_ssm_state(struct llama_context * ctx, llama_seq_id se
     size_t total_size = 0;
     size_t offset = 0;
     size_t n_floats = size / sizeof(float);
+    const int n_layer = ctx->model.hparams.n_layer;
     
-    for (int i = 0; i < cache.n_layer; i++) {
+    for (int i = 0; i < n_layer; i++) {
         if (cache.s_l[i] != nullptr) {
             int state_dim = cache.s_l[i]->ne[0];
             int n_slots = cache.s_l[i]->ne[1];
