@@ -201,7 +201,7 @@ struct fattn_mma_f16_config<128, 128> {
     static constexpr int  nbatch_fa      = 64;
     static constexpr int  nwarps_max     = 4;
     static constexpr bool Q_in_reg       = true;
-    static constexpr int  nstages_target = 2;
+    static constexpr int  nstages_target = 4;
 
     static int get_nbatch_K2_host(const int /*cc*/, const int /*ncols*/) {
         return 64;
@@ -233,7 +233,7 @@ struct fattn_mma_f16_config<256, 256> {
     static constexpr int  nbatch_fa      = 32;
     static constexpr int  nwarps_max     = 4;
     static constexpr bool Q_in_reg       = true;
-    static constexpr int  nstages_target = 2;
+    static constexpr int  nstages_target = 4;
 
     static int get_nbatch_K2_host(const int /*cc*/, const int /*ncols*/) {
         return 128;
