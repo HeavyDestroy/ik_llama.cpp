@@ -1,6 +1,6 @@
 # Phase 3.3: Fuzzy Matching - Complete
 
-**Date:** 2026-04-09 7:30 PM GMT+8  
+**Date:** 2026-04-09 7:45 PM GMT+8  
 **Status:** ✅ Phase 3.3 Complete - Levenshtein Distance Fuzzy Matching
 
 ## What Was Implemented
@@ -22,7 +22,7 @@
 **Changes:**
 - Added `std::string semantic_name` to `server_prompt_checkpoint`
 - JSON serialization includes name field
-- Checkpoint creation now stores semantic names
+- Checkpoint creation now stores semantic names (set after construction)
 
 ### 3. How It Works
 
