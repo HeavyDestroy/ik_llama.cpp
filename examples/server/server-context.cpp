@@ -1504,6 +1504,34 @@ bool server_context::process_token(completion_token_output& result, server_slot&
     const std::string token_str = result.text_to_send;
     slot.sampled = result.tok;
 
+    // Semantic boundary detection (Phase 2.5)
+    if (semantic_checkpoints_enabled && !token_str.empty()) {
+        int32_t current_pos = slot.cache_tokens.n_tokens();
+        auto boundaries = boundary_detector->process_token(token_str, current_pos);
+        
+        // Check if we hit a boundary (end of code block, section, etc.)
+        if (!boundaries.empty()) {
+            const auto& last_boundary = boundaries.back();
+            std::string boundary_name = boundary_detector->get_current_name();
+            
+            if (!boundary_name.empty() && current_pos - last_checkpoint_boundary >= min_checkpoint_distance) {
+                SLT_DBG(slot, "detected semantic boundary: %s at pos %d\n", boundary_name.c_str(), current_pos);
+                
+                // Create checkpoint at this boundary
+                // Note: We need to be careful here - we might be in the middle of processing
+                // For now, we'll create the checkpoint if we're at a meaningful boundary
+                if (last_boundary.type == llama_server::BoundaryType::CODE_BLOCK_END ||
+                    last_boundary.type == llama_server::BoundaryType::MARKDOWN_HEADER ||
+                    last_boundary.type == llama_server::BoundaryType::SECTION_DIVIDER) {
+                    
+                    // Create checkpoint with semantic name
+                    create_checkpoint(slot, boundary_name);
+                    last_checkpoint_boundary = current_pos;
+                }
+            }
+        }
+    }
+
     // search stop word and delete it
     slot.generated_text += token_str;
     slot.has_next_token = true;
