@@ -7591,6 +7591,100 @@ size_t llama_state_seq_set_data(struct llama_context * ctx, const uint8_t * src,
     }
 }
 
+// SSM state extraction for hybrid models (Qwen 3.5)
+// Extracts the recurrent state s_t (48 dims) from cache.s_l
+size_t llama_state_seq_get_ssm_state(struct llama_context * ctx, llama_seq_id seq_id, float * dst, size_t size) {
+    llama_synchronize(ctx);
+    
+    auto & cache = ctx->kv_self;
+    
+    // Check if this is a hybrid/recurrent model
+    if (!cache.recurrent && !llm_arch_is_hybrid(ctx->model.arch)) {
+        return 0;
+    }
+    
+    size_t total_size = 0;
+    size_t offset = 0;
+    
+    // Iterate over all layers to extract recurrent state
+    for (int i = 0; i < cache.n_layer; i++) {
+        if (cache.s_l[i] != nullptr) {
+            // cache.s_l[i] has shape [state_dim, qnext_state_slots]
+            // We extract state_dim floats for the given seq_id
+            int state_dim = cache.s_l[i]->ne[0];
+            int n_slots = cache.s_l[i]->ne[1];
+            
+            if (seq_id >= n_slots) {
+                LLAMA_LOG_ERROR("%s: seq_id %d out of range (max %d)\n", __func__, seq_id, n_slots);
+                return 0;
+            }
+            
+            // Calculate offset for this sequence in the tensor
+            // Data layout: [state_dim * n_slots]
+            size_t seq_offset = seq_id * state_dim * ggml_element_size(cache.s_l[i]);
+            float * s_data = (float *)cache.s_l[i]->data;
+            
+            // Check if we have enough space in destination
+            if (offset + state_dim > size) {
+                LLAMA_LOG_ERROR("%s: destination buffer too small (need %zu, have %zu)\n", 
+                    __func__, offset + state_dim, size);
+                return 0;
+            }
+            
+            // Copy the state for this layer
+            memcpy(dst + offset, s_data + seq_offset, state_dim * sizeof(float));
+            offset += state_dim;
+            total_size += state_dim;
+        }
+    }
+    
+    return total_size * sizeof(float);
+}
+
+// Restore SSM state for hybrid models
+size_t llama_state_seq_set_ssm_state(struct llama_context * ctx, llama_seq_id seq_id, const float * src, size_t size) {
+    llama_synchronize(ctx);
+    
+    auto & cache = ctx->kv_self;
+    
+    if (!cache.recurrent && !llm_arch_is_hybrid(ctx->model.arch)) {
+        return 0;
+    }
+    
+    size_t total_size = 0;
+    size_t offset = 0;
+    size_t n_floats = size / sizeof(float);
+    
+    for (int i = 0; i < cache.n_layer; i++) {
+        if (cache.s_l[i] != nullptr) {
+            int state_dim = cache.s_l[i]->ne[0];
+            int n_slots = cache.s_l[i]->ne[1];
+            
+            if (seq_id >= n_slots) {
+                LLAMA_LOG_ERROR("%s: seq_id %d out of range (max %d)\n", __func__, seq_id, n_slots);
+                return 0;
+            }
+            
+            if (offset + state_dim > n_floats) {
+                LLAMA_LOG_ERROR("%s: source buffer too small (need %zu, have %zu)\n", 
+                    __func__, offset + state_dim, n_floats);
+                return 0;
+            }
+            
+            // Calculate offset for this sequence
+            size_t seq_offset = seq_id * state_dim;
+            float * s_data = (float *)cache.s_l[i]->data;
+            
+            // Copy the state for this layer
+            memcpy(s_data + seq_offset, src + offset, state_dim * sizeof(float));
+            offset += state_dim;
+            total_size += state_dim;
+        }
+    }
+    
+    return total_size * sizeof(float);
+}
+
 static size_t llama_state_seq_save_file_internal(struct llama_context * ctx, const char * filepath, llama_seq_id seq_id, const llama_token * tokens, size_t n_token_count) {
     llama_file file(filepath, "wb");
 

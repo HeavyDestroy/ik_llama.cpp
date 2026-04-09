@@ -942,6 +942,25 @@ extern "C" {
                     llama_seq_id   dest_seq_id,
            llama_state_seq_flags   flags);
 
+    // Extract SSM (DeltaNet) recurrent state from the context
+    // For hybrid models (Qwen 3.5): extracts the 48-dim state s_t per layer
+    // Returns the number of bytes written, or 0 if not a hybrid/recurrent model
+    // dst must have size >= n_layer * state_dim * sizeof(float) (e.g., 64 * 48 * 4 = 12KB for Qwen 3.5)
+    LLAMA_API size_t llama_state_seq_get_ssm_state(
+            struct llama_context * ctx,
+                    llama_seq_id   seq_id,
+                         float * dst,
+                          size_t   size);
+
+    // Restore SSM (DeltaNet) recurrent state to the context
+    // For hybrid models (Qwen 3.5): restores the 48-dim state s_t per layer
+    // Returns the number of bytes read, or 0 if not a hybrid/recurrent model
+    LLAMA_API size_t llama_state_seq_set_ssm_state(
+            struct llama_context * ctx,
+                    llama_seq_id   seq_id,
+                   const float * src,
+                          size_t   size);
+
     LLAMA_API size_t llama_state_seq_save_file(
             struct llama_context * ctx,
                       const char * filepath,

@@ -54,7 +54,8 @@ void semantic_checkpoint_manager::add_checkpoint(
     cp.data = kv_data;
     cp.last_accessed = std::chrono::steady_clock::now().time_since_epoch().count();
     
-    // Store SSM state for hybrid models
+    // Store SSM state for hybrid models (Qwen 3.5)
+    // ssm_s contains the recurrent state s_t (48 floats per layer × 64 layers = 3072 floats)
     cp.ssm_state_alpha = ssm_alpha;
     cp.ssm_state_beta = ssm_beta;
     cp.ssm_state_s = ssm_s;
