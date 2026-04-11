@@ -1222,18 +1222,25 @@ llm_expert_gating_func_type   gating_op,
         cb(experts, "ffn_moe_down_biased", il);
     }
 
-    if (down_exps_s) {
-        ggml_tensor * s = ggml_reshape_3d(ctx, down_exps_s, 1, n_expert, 1);
+    if (down_exps_s && !lctx.cparams.fused_mmad) {
+        GGML_ASSERT(!weight_before_ffn);
+        auto s = ggml_reshape_3d(ctx, down_exps_s, 1, n_expert, 1);
         s = ggml_repeat_4d(ctx, s, 1, n_expert, n_tokens, 1);
-        s = ggml_get_rows(ctx, s, selected_experts); // [1, n_expert_used, n_tokens]
-        experts = ggml_mul(ctx, experts, s);
-        cb(experts, "ffn_moe_down_scaled", il);
+        s = ggml_get_rows(ctx, s, selected_experts);
+        auto w_reshaped = ggml_reshape_2d(ctx, weights, n_expert_used, n_tokens);
+        auto s_reshaped = ggml_reshape_2d(ctx, s, n_expert_used, n_tokens);
+        w_reshaped = ggml_mul(ctx, w_reshaped, s_reshaped);
+        weights = ggml_reshape_3d(ctx, w_reshaped, 1, n_expert_used, n_tokens);
     }
 
     if (!weight_before_ffn) {
         if (lctx.cparams.fused_mmad) {
             experts = ggml_mul_multi_add(ctx, experts, weights);
             cb(experts, "ffn_moe_weighted", il);
+            if (down_exps_s) {
+                experts->src[2] = down_exps_s;
+                experts->src[3] = selected_experts;
+            }
             if (add_input) {
                 experts = ggml_add(ctx, experts, input);
                 cb(experts, "ffn_out_with_inp", il);
@@ -6026,7 +6033,7 @@ ggml_cgraph * llm_build_context::build_gemma3() {
     return gf;
 }
 
-static ggml_cgraph * build_gemma4_graph_paralle(llm_build_context & llm, llama_context & lctx, ggml_context * ctx0,
+static ggml_cgraph * build_gemma4_graph_parallel(llm_build_context & llm, llama_context & lctx, ggml_context * ctx0,
         ggml_tensor * inpL, ggml_tensor * inp_pos, ggml_tensor * inp_out_ids,
         ggml_tensor * KQ_mask, ggml_tensor * KQ_mask_swa, int n_tokens,  const llm_build_cb & cb) {
     auto & model   = lctx.model;
@@ -6299,10 +6306,13 @@ static ggml_cgraph * build_gemma4_graph_paralle(llm_build_context & llm, llama_c
 
             if (is_moe) {
                 cur = do_split_norm(ctx0, ffn_inp[id], model.layers[il].ffn_pre_norm_2, hparams, cb, id, il_cb, false);
-                auto tmp = ggml_rms_norm(ctx0, ffn_inp[id], hparams.f_norm_rms_eps);
-                tmp = ggml_scale(ctx0, tmp, 1.0f / sqrtf((float) hparams.n_embd));
-                tmp = ggml_mul(ctx0, tmp, ((const ggml_split_tensor_t *)model.layers[il].ffn_gate_inp_s->extra)->splits[id]);
+                cb(cur, "ffn_moe_inp", il_cb);
+                auto tmp = ggml_fused_rms_norm(ctx0, ffn_inp[id],
+                        ((const ggml_split_tensor_t *)model.layers[il].ffn_gate_inp_s->extra)->splits[id], hparams.f_norm_rms_eps);
+                cb(tmp, "tmp", il_cb);
                 auto logits = llm.llm_build_lora_mm(lctx, ctx0, ((const ggml_split_tensor_t *)model.layers[il].ffn_gate_inp->extra)->splits[id], tmp);
+                cb(logits, "logits", il_cb);
+                ggml_build_forward_expand(gf, logits);
 
                 auto moe = llm. llm_build_moe_ffn(ctx0, lctx, cur,
                         nullptr, nullptr, nullptr,
@@ -6420,6 +6430,7 @@ ggml_cgraph * llm_build_context::build_gemma4() {
     struct ggml_tensor * inpL;
 
     inpL = llm_build_inp_embd(ctx0, lctx, hparams, batch, model.tok_embd, cb);
+    cb(inpL, "tok_embd", -1);
 
     // important: do not normalize weights for raw embeddings input (i.e. encoded image emdeddings)
     if (batch.token) {
@@ -6463,7 +6474,7 @@ ggml_cgraph * llm_build_context::build_gemma4() {
     }
 
     if (model.split_mode == LLAMA_SPLIT_MODE_GRAPH) {
-        return build_gemma4_graph_paralle(*this, lctx, ctx0, inpL, inp_pos, inp_out_ids,
+        return build_gemma4_graph_parallel(*this, lctx, ctx0, inpL, inp_pos, inp_out_ids,
                                      KQ_mask, KQ_mask_swa, n_tokens,  cb);
     }
 
@@ -6565,9 +6576,8 @@ ggml_cgraph * llm_build_context::build_gemma4() {
             cb(cur_moe, "ffn_norm_2", il);
 
             // custom MoE logits calculation (router operates on attn_out, not cur)
-            auto tmp = ggml_rms_norm(ctx0, attn_out, hparams.f_norm_rms_eps);
-            tmp = ggml_scale(ctx0, tmp, 1.0f / sqrtf((float) n_embd));
-            tmp = ggml_mul(ctx0, tmp, model.layers[il].ffn_gate_inp_s);
+            auto tmp = ggml_fused_rms_norm(ctx0, attn_out, model.layers[il].ffn_gate_inp_s, hparams.f_norm_rms_eps);
+            cb(tmp, "tmp", il);
             auto logits = llm_build_lora_mm(lctx, ctx0, model.layers[il].ffn_gate_inp, tmp); // [n_expert, n_tokens]
             cb(logits, "ffn_moe_logits", il);
 
