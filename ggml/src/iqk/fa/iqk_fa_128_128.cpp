@@ -5,6 +5,16 @@
 #include "iqk/fa/iqk_fa_templates.h"
 #include <cpuid.h>
 
+// Forward declarations for AMX Flash Attention
+#if defined(__AVX512BF16__) && defined(__AVX512BW__) && defined(__AVX512VL__) && defined(__AVX512DQ__) && defined(__AVX512VBMI2__)
+extern "C" bool amx_fa_128_128(int int_type_k, int int_type_v, int nq, int nk,
+                               int stride_q, int stride_k, int stride_v,
+                               int stride_m, int stride_qkv,
+                               const float * q, const void * k, const void * v,
+                               const void * mask, float scale, float softcap,
+                               float * qkv, const float * sinkf, float * M, float * S);
+#endif
+
 // Runtime AMX detection for Sapphire Rapids
 #if defined(__AVX512BF16__) && defined(__AVX512BW__) && defined(__AVX512VL__) && defined(__AVX512DQ__) && defined(__AVX512VBMI2__)
 inline bool cpu_has_amx() {
@@ -30,18 +40,8 @@ IQK_FA_CASE(iqk_fa_128_128) {
     // AMX Flash Attention for Sapphire Rapids - uses tile units for 2-3x speedup
     if (cpu_has_amx() && nk >= 256 && nk % 16 == 0) {
         // AMX path: uses 16x16 BF16 tiles, requires nk multiple of 16
-        // For now, dispatch to existing optimized path with larger block sizes
-        // Full AMX implementation coming in next commit
-        if (nk >= 1024 && nk%512 == 0) {
-            iqk_flash_helper_T<128, 128, 512>(nq, nk, stride_q, stride_k, stride_v, stride_m, stride_qkv,
+        return amx_fa_128_128(int_type_k, int_type_v, nq, nk, stride_q, stride_k, stride_v, stride_m, stride_qkv,
                     q, ck, cv, cm, scale, softcap, qkv, sinkf, M, S);
-            return true;
-        }
-        if (nk >= 512 && nk%256 == 0) {
-            iqk_flash_helper_T<128, 128, 256>(nq, nk, stride_q, stride_k, stride_v, stride_m, stride_qkv,
-                    q, ck, cv, cm, scale, softcap, qkv, sinkf, M, S);
-            return true;
-        }
     }
 #endif
 
