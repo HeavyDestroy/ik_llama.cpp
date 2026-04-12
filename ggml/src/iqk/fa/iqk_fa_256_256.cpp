@@ -38,11 +38,11 @@ IQK_FA_CASE(iqk_fa_256_256) {
 
 #if defined(__AVX512BF16__) && defined(__AVX512BW__) && defined(__AVX512VL__) && defined(__AVX512DQ__) && defined(__AVX512VBMI2__)
     // AMX Flash Attention for Sapphire Rapids - uses tile units for 2-3x speedup
-    if (cpu_has_amx() && nk >= 256 && nk % 16 == 0) {
-        // AMX path: uses 16x16 BF16 tiles, requires nk multiple of 16
-        return amx_fa_256_256(int_type_k, int_type_v, nq, nk, stride_q, stride_k, stride_v, stride_m, stride_qkv,
-                    q, ck, cv, cm, scale, softcap, qkv, sinkf, M, S);
-    }
+    // Requires: GCC 14+ with -mamx-avx512, or newer compiler with AMX tile support
+    // Currently disabled - AMX tile intrinsics not available in current toolchain
+    // if (cpu_has_amx() && nk >= 256 && nk % 16 == 0) {
+    //     return amx_fa_256_256(...);
+    // }
 #endif
 
 #ifdef __AVX512BF16__
