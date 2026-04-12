@@ -17,6 +17,11 @@ IQK_FA_CASE(iqk_fa_256_256) {
 #ifdef __AVX512BF16__
     if (type_k == GGML_TYPE_BF16) {
         if (type_v != GGML_TYPE_BF16) return false; // we do not support mixing bf16 k-cache with other types
+        if (nk%256 == 0) {
+            iqk_flash_helper_T<256, 256, 256>(nq, nk, stride_q, stride_k, stride_v, stride_m, stride_qkv,
+                    q, ck, cv, cm, scale, softcap, qkv, sinkf, M, S);
+            return true;
+        }
         if (nk%64 == 0) {
             iqk_flash_helper_T<256, 256, 64>(nq, nk, stride_q, stride_k, stride_v, stride_m, stride_qkv,
                     q, ck, cv, cm, scale, softcap, qkv, sinkf, M, S);
@@ -28,6 +33,10 @@ IQK_FA_CASE(iqk_fa_256_256) {
     }
 #endif
 
+    if (nk%256 == 0) {
+        return iqk_flash_helper_T<256, 256, 256>(type_k, type_v, nq, nk, stride_q, stride_k, stride_v, stride_m, stride_qkv,
+                q, ck, cv, cm, scale, softcap, qkv, sinkf, M, S);
+    }
     if (nk%128 == 0) {
         return iqk_flash_helper_T<256, 256, 128>(type_k, type_v, nq, nk, stride_q, stride_k, stride_v, stride_m, stride_qkv,
                 q, ck, cv, cm, scale, softcap, qkv, sinkf, M, S);
