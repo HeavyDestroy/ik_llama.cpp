@@ -17,7 +17,7 @@ IQK_FA_CASE(iqk_fa_128_128) {
 #ifdef __AVX512BF16__
     if (type_k == GGML_TYPE_BF16) {
         if (type_v != GGML_TYPE_BF16) return false; // we do not support mixing bf16 k-cache with other types
-        if (nk%256 == 0) {
+        if (nk >= 512 && nk%256 == 0) {
             iqk_flash_helper_T<128, 128, 256>(nq, nk, stride_q, stride_k, stride_v, stride_m, stride_qkv,
                     q, ck, cv, cm, scale, softcap, qkv, sinkf, M, S);
             return true;
@@ -33,7 +33,8 @@ IQK_FA_CASE(iqk_fa_128_128) {
     }
 #endif
 
-    if (nk%256 == 0) {
+    // Only use 256-block for larger contexts (nk >= 512) to avoid overhead at small contexts
+    if (nk >= 512 && nk%256 == 0) {
         return iqk_flash_helper_T<128, 128, 256>(type_k, type_v, nq, nk, stride_q, stride_k, stride_v, stride_m, stride_qkv,
                 q, ck, cv, cm, scale, softcap, qkv, sinkf, M, S);
     }
