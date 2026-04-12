@@ -269,7 +269,6 @@ if (GGML_IQK_MUL_MAT)
                             iqk/fa/iqk_fa_192_128.cpp
                             iqk/fa/iqk_fa_192_192.cpp
                             iqk/fa/iqk_fa_256_256.cpp
-                            iqk/fa/iqk_fa_amx.cpp
                             iqk/fa/iqk_fa_128_128.cpp
                             iqk/fa/iqk_fa_96_96.cpp
                             iqk/fa/iqk_fa_64_64.cpp
