@@ -1376,7 +1376,7 @@ elseif (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR CMAKE_GENERATOR_PLATFORM_LW
         endif()
     else()
         if (GGML_NATIVE)
-            list(APPEND ARCH_FLAGS -march=native)
+            list(APPEND ARCH_FLAGS -march=native -mamd-ext-avx512)
         endif()
         if (GGML_F16C)
             list(APPEND ARCH_FLAGS -mf16c)
@@ -1563,3 +1563,4 @@ if (BUILD_SHARED_LIBS)
     set_target_properties(ggml PROPERTIES POSITION_INDEPENDENT_CODE ON)
     target_compile_definitions(ggml PRIVATE GGML_SHARED GGML_BUILD)
 endif()
+                            iqk/fa/iqk_fa_amx.cpp

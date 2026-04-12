@@ -2,48 +2,37 @@
 // Copyright (C) 2024-2026 Iwan Kawrakow & HeavyDestroy
 // MIT license
 // SPDX-License-Identifier: MIT
-//
+// AMX Flash Attention for Sapphire Rapids Xeon
 
 #include "iqk/iqk_config.h"
 
 #if defined IQK_IMPLEMENT && defined GGML_IQK_FLASH_ATTENTION
 
 #include "iqk/fa/iqk_fa_templates.h"
-#include <cpuid.h>
 #include <immintrin.h>
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 
-// Runtime AMX detection for Sapphire Rapids
-#if defined(__AVX512BF16__) && defined(__AVX512BW__) && defined(__AVX512VL__) && defined(__AVX512DQ__) && defined(__AVX512VBMI2__)
-inline bool cpu_has_amx() {
-    int cpuinfo[4];
-    __cpuid_count(7, 0, cpuinfo[0], cpuinfo[1], cpuinfo[2], cpuinfo[3]);
-    return (cpuinfo[6] & (1 << 22)) != 0; // X86_FEATURE_AMX_BF16
-}
-#else
-inline bool cpu_has_amx() { return false; }
-#endif
-
-// AMX Flash Attention implementation
-// Head dim 128: uses 8 tiles (128/16 = 8)
-// Head dim 256: uses 16 tiles (256/16 = 16)
-// Processes in 16-token blocks for both Q and K dimensions
+// AMX tile intrinsics require -mamd-ext-avx512 compiler flag
 
 #if defined(__AVX512BF16__) && defined(__AVX512BW__) && defined(__AVX512VL__) && defined(__AVX512DQ__) && defined(__AVX512VBMI2__)
 
 namespace {
 
+// AMX Flash Attention using 16x16 BF16 tiles
+// head_dim: 128 (8 tiles) or 256 (16 tiles)
+// Processes Q in 16-token blocks, K/V in 16-token blocks
+
 inline void amx_flash_attn(int head_dim, const float* q, const uint16_t* k, const uint16_t* v,
                            const uint16_t* mask, int nq, int nk,
                            float scale, float* out, float* M, float* S) {
-    // Initialize AMX tiles
-    _mm512_tile_store_dps();
+    // Initialize AMX tile data processing state
+    _mm512_tile_init_dps();
     
     int n_tiles = head_dim / 16;  // 8 for head_dim=128, 16 for head_dim=256
     
-    // Temporary buffers for tile operations
+    // Temporary buffers (aligned for AMX)
     alignas(64) float qk[16*16];
     alignas(64) float softmax_out[16*16];
     alignas(64) uint16_t tile_buf[256];  // 16x16 BF16
@@ -107,7 +96,7 @@ inline void amx_flash_attn(int head_dim, const float* q, const uint16_t* k, cons
             
             // Step 5: Softmax (row-wise)
             for (int i = 0; i < 16; i++) {
-                const float* row = qk + i * 16;
+                float* row = qk + i * 16;
                 float max_val = -1e30f;
                 for (int j = 0; j < k_rem; j++) {
                     if (mask != nullptr && mask[(i + q_blk) * nk + (j + k_blk)] == 0) {
@@ -128,7 +117,7 @@ inline void amx_flash_attn(int head_dim, const float* q, const uint16_t* k, cons
             }
             
             // Step 6: Load softmax weights and V, accumulate QKV
-            // Load softmax row into TMM0..TMM7 (reused)
+            // Load softmax row into TMM0..TMM(n_tiles-1)
             for (int t = 0; t < n_tiles; t++) {
                 for (int r = 0; r < 16; r++) {
                     __m128 f32 = _mm_load_ps(softmax_out + t * 16 + r * 16);
@@ -179,14 +168,13 @@ inline void amx_flash_attn(int head_dim, const float* q, const uint16_t* k, cons
         delete[] qkv_acc;
     }
     
-    _mm512_tile_release_dps();
+    // Release AMX tiles
+    _mm512_tile_init_dps();  // Re-init releases previous state
 }
 
 } // namespace
 
-#endif // AMX availability
-
-// IQK_FA_CASE macro implementation
+// IQK_FA_CASE macro
 #define IQK_FA_CASE(func_name) \
     bool func_name(int int_type_k, int int_type_v, int nq, int nk, \
                    int stride_q, int stride_k, int stride_v, \
@@ -195,24 +183,20 @@ inline void amx_flash_attn(int head_dim, const float* q, const uint16_t* k, cons
                    const void * mask, float scale, float softcap, \
                    float * qkv, const float * sinkf, float * M, float * S) {
 
-define IQK_FA_CASE_END } IQK_FA_CASE_END
-
 // 128x128 AMX implementation
-#if defined(__AVX512BF16__) && defined(__AVX512BW__) && defined(__AVX512VL__) && defined(__AVX512DQ__) && defined(__AVX512VBMI2__)
 IQK_FA_CASE(amx_fa_128_128) {
     amx_flash_attn(128, q, (const uint16_t*)k, (const uint16_t*)v, 
                    (const uint16_t*)mask, nq, nk, scale, qkv, M, S);
     return true;
 }
-#endif
 
 // 256x256 AMX implementation  
-#if defined(__AVX512BF16__) && defined(__AVX512BW__) && defined(__AVX512VL__) && defined(__AVX512DQ__) && defined(__AVX512VBMI2__)
 IQK_FA_CASE(amx_fa_256_256) {
     amx_flash_attn(256, q, (const uint16_t*)k, (const uint16_t*)v,
                    (const uint16_t*)mask, nq, nk, scale, qkv, M, S);
     return true;
 }
-#endif
+
+#endif // AMX intrinsics available
 
 #endif // IQK_IMPLEMENT && GGML_IQK_FLASH_ATTENTION
