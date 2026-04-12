@@ -269,6 +269,7 @@ if (GGML_IQK_MUL_MAT)
                             iqk/fa/iqk_fa_192_128.cpp
                             iqk/fa/iqk_fa_192_192.cpp
                             iqk/fa/iqk_fa_256_256.cpp
+                            iqk/fa/iqk_fa_amx.cpp
                             iqk/fa/iqk_fa_128_128.cpp
                             iqk/fa/iqk_fa_96_96.cpp
                             iqk/fa/iqk_fa_64_64.cpp
@@ -1376,7 +1377,10 @@ elseif (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR CMAKE_GENERATOR_PLATFORM_LW
         endif()
     else()
         if (GGML_NATIVE)
-            list(APPEND ARCH_FLAGS -march=native -mamx-avx512)
+            list(APPEND ARCH_FLAGS -march=native)
+        if ((GGML_NATIVE AND GGML_AVX512) OR GGML_AMX_TILE)
+            list(APPEND ARCH_FLAGS -mamx-avx512)
+        endif()
         endif()
         if (GGML_F16C)
             list(APPEND ARCH_FLAGS -mf16c)
