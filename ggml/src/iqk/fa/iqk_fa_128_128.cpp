@@ -3,6 +3,7 @@
 #if defined IQK_IMPLEMENT && defined GGML_IQK_FLASH_ATTENTION
 
 #include "iqk/fa/iqk_fa_templates.h"
+#include <cpuid.h>
 
 // Runtime AMX detection for Sapphire Rapids
 #if defined(__AVX512BF16__) && defined(__AVX512BW__) && defined(__AVX512VL__) && defined(__AVX512DQ__) && defined(__AVX512VBMI2__)
