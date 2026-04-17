@@ -49,21 +49,7 @@ static void init_tensor_uniform(ggml_tensor * tensor, float min = -1.0f, float m
         t.join();
     }
 
-#if 0
-    const char * val_str = getenv("GGML_TEST_EPS");
-    float val = 1e-9f;
-    if (val_str != nullptr) {
-        val = std::stof(val_str);
-        printf("GGML_TEST_EPS=%e\n", val);
-    }
 
-    // test quantization with very small values that may result in nan scales due to division by zero
-    if (ggml_is_quantized(tensor->type)) {
-        for (int i = 0; i < 256; i++) {
-            data[i] = val;
-        }
-    }
-#endif
 
     if (tensor->type == GGML_TYPE_F32 || tensor->type == GGML_TYPE_I32) {
         ggml_backend_tensor_set(tensor, data.data(), 0, size * sizeof(float));
@@ -2338,21 +2324,7 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
     test_cases.emplace_back(new test_diag_mask_inf(GGML_TYPE_F32, {10, 10, 10,  1}, 5));
     test_cases.emplace_back(new test_diag_mask_inf(GGML_TYPE_F32, {10, 10, 10, 10}, 5));
 
-#if 0
-    std::uniform_int_distribution<> dist_ne1(1, 50);
-    int exponent = 1;
-    while (exponent < (1 << 17)) {
-        std::uniform_int_distribution<> dist_ne0(exponent, 2*exponent);
 
-        for (int n = 0; n < 10; ++n) {
-            int64_t ne0 = dist_ne0(rng);
-            int64_t ne1 = dist_ne1(rng);
-            test_cases.emplace_back(new test_soft_max(GGML_TYPE_F32, GGML_TYPE_F32, {ne0, ne1, 1, 1}, n/2 == 0, 0.1f, ne0 < 1000 ? 4.0f : 0.0f));
-        }
-
-        exponent <<= 1;
-    }
-#endif
     for (bool mask : {false, true}) {
         for (float max_bias : {0.0f, 8.0f}) {
             if (!mask && max_bias > 0.0f) continue;
@@ -2481,13 +2453,7 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
         }
     }
 
-    // these tests are disabled to save execution time, but they can be handy for debugging
-#if 0
-    test_cases.emplace_back(new test_llama(1));
-    test_cases.emplace_back(new test_llama(2));
-    test_cases.emplace_back(new test_falcon(1));
-    test_cases.emplace_back(new test_falcon(2));
-#endif
+    
 
     // run tests
     if (mode == MODE_TEST) {

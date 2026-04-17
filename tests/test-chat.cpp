@@ -957,21 +957,7 @@ static void test_template_output_parsers() {
                 "}",
                 /* is_partial= */ false,
                 {COMMON_CHAT_FORMAT_GENERIC}));
-#if 0
-        test_templates(tmpls.get(), end_tokens, message_assist_call_id, tools,
-                      "{\n"
-                      "  \"tool_calls\": [\n"
-                      "    {\n"
-                      "      \"name\": \"special_function\",\n"
-                      "      \"arguments\": {\n"
-                      "        \"arg1\": 1\n"
-                      "      },\n"
-                      "      \"id\": \"123456789\"\n"
-                      "    }\n"
-                      "  ],\n"
-                      "  \"content\": \"\"\n"
-                      "}");
-#endif
+
     }
     {
         auto tmpls = read_templates("models/templates/mistralai-Mistral-Nemo-Instruct-2407.jinja");
@@ -1765,25 +1751,7 @@ static void test_template_output_parsers() {
         test_templates(tmpls.get(), end_tokens, message_assist, tools,
                       "Hello, world!\nWhat's up?",
                       /* expect_grammar_triggered= */ false);
-    // TODO @ngxson : generic tool call should be removed in the future
-#if 0
-        // Test template generation for tool calls
-        test_templates(tmpls.get(), end_tokens, message_assist_call_id, tools,
-                      "{\n"
-                      "  \"tool_calls\": [\n"
-                      "    {\n"
-                      "      \"name\": \"special_function\",\n"
-                      "      \"arguments\": {\n"
-                      "        \"arg1\": 1\n"
-                      "      },\n"
-                      "      \"id\": \"123456789\"\n"
-                      "    }\n"
-                      "  ],\n"
-                      "  \"content\": \"\"\n"
-                      "}",
-                      /* expect_grammar_triggered= */ false
-        );
-#endif
+    
     }
     {
         auto tmpls = read_templates("models/templates/openai-gpt-oss-120b.jinja");
