@@ -343,6 +343,9 @@ void server_context::init() {
         };
     }
 
+    // Initialize built-in tools
+    tools.setup(params_base.server_tools);
+
 }
 
 
@@ -3098,7 +3101,12 @@ void server_context::apply_checkpoint(server_slot & slot) {
                 // restore the context checkpoint
                 const int64_t t_start = ggml_time_us();
                 const size_t checkpoint_size = it->data.size();
-                const size_t n = llama_state_seq_set_data(ctx, it->data.data(), checkpoint_size, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+                
+                // For hybrid models, use full state restore (flags=0) to restore the recurrent state
+                const bool is_hybrid = llama_model_is_hybrid(llama_get_model(ctx));
+                const llama_state_seq_flags restore_flags = is_hybrid ? 0 : LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY;
+                
+                const size_t n = llama_state_seq_set_data(ctx, it->data.data(), checkpoint_size, slot.id, restore_flags);
 
                 if (n != checkpoint_size) {
                     SLT_ERR(slot, "failed to restore context checkpoint (pos_min = %d, pos_max = %d, size = %.3f MiB)\n", it->pos_min, it->pos_max, (float)checkpoint_size / 1024 / 1024);
@@ -3109,7 +3117,7 @@ void server_context::apply_checkpoint(server_slot & slot) {
                     slot.n_past = slot.cache_tokens.size_up_to_pos(slot.n_past-1);
                     slot.n_past_prompt = std::min(slot.n_past_prompt, std::max(it->pos_min_prompt+1, it->pos_max_prompt));
                     slot.n_past_prompt = slot.prompt_tokens.size_up_to_pos(slot.n_past_prompt-1);
-                    SLT_WRN(slot, "restored context checkpoint took  %.2f ms (pos_min = %d, pos_max = %d, size = %.3f MiB)\n", (ggml_time_us() - t_start) / 1000.0, it->pos_min, it->pos_max, (float)checkpoint_size / 1024 / 1024);
+                    SLT_WRN(slot, "restored context checkpoint took  %.2f ms (pos_min = %d, pos_max = %d, size = %.3f MiB, hybrid=%d)\n", (ggml_time_us() - t_start) / 1000.0, it->pos_min, it->pos_max, (float)checkpoint_size / 1024 / 1024, is_hybrid ? 1 : 0);
                 }
             }
 
@@ -3159,7 +3167,14 @@ bool server_context::create_checkpoint(server_slot & slot) {
             slot.server_cached_prompt.checkpoints.erase(slot.server_cached_prompt.checkpoints.begin());
         }
 
-        const size_t checkpoint_size = llama_state_seq_get_size(ctx, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+        // For hybrid/recurrent models, we MUST save the full state including KV cache
+        // because the recurrent state (DeltaNet hidden states) is stored in the V-cache.
+        // Using PARTIAL_ONLY would skip the V-cache and lose the recurrent state,
+        // causing crashes when the checkpoint is restored.
+        const bool is_hybrid = llama_model_is_hybrid(llama_get_model(slot.ctx));
+        const llama_state_seq_flags checkpoint_flags = is_hybrid ? 0 : LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY;
+
+        const size_t checkpoint_size = llama_state_seq_get_size(ctx, slot.id, checkpoint_flags);
 
         auto & cur = slot.server_cached_prompt.checkpoints.emplace_back(server_prompt_checkpoint{
             /*.pos_min = */ pos_min,
@@ -3169,11 +3184,11 @@ bool server_context::create_checkpoint(server_slot & slot) {
             /*.data    = */ std::vector<uint8_t>(checkpoint_size),
             });
 
-        llama_state_seq_get_data(ctx, cur.data.data(), checkpoint_size, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+        llama_state_seq_get_data(ctx, cur.data.data(), checkpoint_size, slot.id, checkpoint_flags);
 
-        SLT_WRN(slot, "created context checkpoint %d of %d (pos_min = %d, pos_max = %d, size = %.3f MiB, took %.2f ms)\n",
+        SLT_WRN(slot, "created context checkpoint %d of %d (pos_min = %d, pos_max = %d, size = %.3f MiB, took %.2f ms, hybrid=%d)\n",
             (int)slot.server_cached_prompt.checkpoints.size(), params_base.ctx_checkpoints_n, cur.pos_min, cur.pos_max, (float)cur.data.size() / 1024 / 1024,
-            (ggml_time_us() - t_start) / 1000.0);
+            (ggml_time_us() - t_start) / 1000.0, is_hybrid ? 1 : 0);
     }
     return do_checkpoint;
 }

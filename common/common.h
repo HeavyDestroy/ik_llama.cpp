@@ -284,6 +284,7 @@ struct gpt_params {
     std::vector<std::string> in_files;     // all input files
     std::vector<std::string> antiprompt;   // strings upon which more user input is prompted (a.k.a. reverse prompts)
     std::vector<std::string> ban_phrases;  // strings that are banned in generation
+    std::vector<std::string> server_tools; // built-in tools to enable
     int32_t banned_n                 =  1; // number of tokens that are banned in the phrase
     size_t n_buffer                  =  0; // number of token buffers for string ban
     bool can_ban_phrases             = true;  // whether to ban strings
@@ -588,6 +589,7 @@ void string_process_escapes(std::string & input);
 
 bool fs_validate_filename(const std::string & filename);
 bool fs_create_directory_with_parents(const std::string & path);
+bool glob_match(const std::string & pattern, const std::string & str);
 
 std::string fs_get_cache_directory();
 std::string fs_get_cache_file(const std::string & filename);

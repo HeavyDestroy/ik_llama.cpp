@@ -7,6 +7,7 @@
 #include "chat.h"
 #include "mtmd.h"
 #include "mtmd-helper.h"
+#include "server-tools.h"
 #define JSON_ASSERT GGML_ASSERT
 #include <nlohmann/json.hpp>
 

@@ -10351,31 +10351,11 @@ ggml_cgraph * llm_build_context::llama_build_graph(
             {
                 result = llm.build_grok();
             } break;
-        case LLM_ARCH_STARCODER:
-            {
-                result = llm.build_starcoder();
-            } break;
-        case LLM_ARCH_REFACT:
-            {
-                result = llm.build_refact();
-            } break;
         case LLM_ARCH_BERT:
         case LLM_ARCH_JINA_BERT_V2:
         case LLM_ARCH_NOMIC_BERT:
             {
                 result = llm.build_bert();
-            } break;
-        case LLM_ARCH_BLOOM:
-            {
-                result = llm.build_bloom();
-            } break;
-        case LLM_ARCH_MPT:
-            {
-                result = llm.build_mpt();
-            } break;
-         case LLM_ARCH_STABLELM:
-            {
-                result = llm.build_stablelm();
             } break;
         case LLM_ARCH_QWEN:
             {
@@ -10429,21 +10409,9 @@ ggml_cgraph * llm_build_context::llama_build_graph(
             {
                 result = llm.build_phi3();
             } break;
-        case LLM_ARCH_PLAMO:
-            {
-                result = llm.build_plamo();
-            } break;
-        case LLM_ARCH_GPT2:
-            {
-                result = llm.build_gpt2();
-            } break;
         case LLM_ARCH_CODESHELL:
             {
                 result = llm.build_codeshell();
-            } break;
-        case LLM_ARCH_ORION:
-            {
-                result = llm.build_orion();
             } break;
         case LLM_ARCH_INTERNLM2:
             {
@@ -10469,33 +10437,17 @@ ggml_cgraph * llm_build_context::llama_build_graph(
             {
                 result = llm.build_gemma4();
             } break;
-        case LLM_ARCH_STARCODER2:
-            {
-                result = llm.build_starcoder2();
-            } break;
         case LLM_ARCH_MAMBA:
             {
                 result = llm.build_mamba();
-            } break;
-        case LLM_ARCH_XVERSE:
-            {
-                result = llm.build_xverse();
             } break;
         case LLM_ARCH_COMMAND_R:
             {
                 result = llm.build_command_r();
             } break;
-        case LLM_ARCH_DBRX:
-            {
-                result = llm.build_dbrx();
-            } break;
         case LLM_ARCH_OLMO:
             {
                 result = llm.build_olmo();
-            } break;
-        case LLM_ARCH_OPENELM:
-            {
-                result = llm.build_openelm();
             } break;
         case LLM_ARCH_GPTNEOX:
             {
@@ -10547,14 +10499,6 @@ ggml_cgraph * llm_build_context::llama_build_graph(
         case LLM_ARCH_T5ENCODER:
             {
                 result = llm.build_t5_encoder();
-            } break;
-        case LLM_ARCH_JAIS:
-            {
-                result = llm.build_jais();
-            } break;
-        case LLM_ARCH_DOTS1:
-            {
-                result = llm.build_dots1();
             } break;
         case LLM_ARCH_ERNIE4_5:
         {

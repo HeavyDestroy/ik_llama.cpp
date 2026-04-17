@@ -274,6 +274,9 @@ struct server_context {
     server_chat_params  chat_params;
     std::map<std::string, bool> chat_template_caps;
 
+    // Built-in tools
+    server_tools tools;
+
     // Necessary similarity of prompt for slot selection
     float slot_prompt_similarity = 0.0f;
     int32_t cache_ram_n_min = 0;

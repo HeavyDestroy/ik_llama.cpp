@@ -3916,7 +3916,6 @@ bool create_tensors_helper::create_tensors() {
     }
     switch (model.arch) {
         case LLM_ARCH_LLAMA:
-        case LLM_ARCH_REFACT:
         case LLM_ARCH_MINICPM:
         case LLM_ARCH_GRANITE:
         case LLM_ARCH_GRANITE_MOE:
@@ -3928,24 +3927,19 @@ bool create_tensors_helper::create_tensors() {
             use_mmap_buffer = create_llama4_tensors(tn); break;
         case LLM_ARCH_GROK:
             use_mmap_buffer = create_grok_tensors(tn); break;
-        case LLM_ARCH_DBRX:
             use_mmap_buffer = create_dbrx_tensors(tn); break;
         case LLM_ARCH_BAICHUAN:
             use_mmap_buffer = create_baichuan_tensors(tn); break;
         case LLM_ARCH_FALCON:
             use_mmap_buffer = create_falcon_tensors(tn); break;
-        case LLM_ARCH_STARCODER:
             use_mmap_buffer = create_starcoder_tensors(tn); break;
         case LLM_ARCH_BERT:
         case LLM_ARCH_NOMIC_BERT:
             use_mmap_buffer = create_bert_tensors(tn); break;
         case LLM_ARCH_JINA_BERT_V2:
             use_mmap_buffer = create_jina_bert2_tensors(tn); break;
-        case LLM_ARCH_BLOOM:
             use_mmap_buffer = create_bloom_tensors(tn); break;
-        case LLM_ARCH_MPT:
             use_mmap_buffer = create_mpt_tensors(tn); break;
-        case LLM_ARCH_STABLELM:
             use_mmap_buffer = create_stablelm_tensors(tn); break;
         case LLM_ARCH_QWEN:
             use_mmap_buffer = create_qwen_tensors(tn); break;
@@ -3970,13 +3964,10 @@ bool create_tensors_helper::create_tensors() {
             use_mmap_buffer = create_phi2_tensors(tn); break;
         case LLM_ARCH_PHI3:
             use_mmap_buffer = create_phi3_tensors(tn); break;
-        case LLM_ARCH_PLAMO:
             use_mmap_buffer = create_baichuan_tensors(tn, false); break;
-        case LLM_ARCH_GPT2:
             use_mmap_buffer = create_gpt2_tensors(tn); break;
         case LLM_ARCH_CODESHELL:
             use_mmap_buffer = create_codeshell_tensors(tn); break;
-        case LLM_ARCH_ORION:
             use_mmap_buffer = create_orion_tensors(tn); break;
         case LLM_ARCH_INTERNLM2:
             use_mmap_buffer = create_internlm_tensors(tn); break;
@@ -3988,17 +3979,14 @@ bool create_tensors_helper::create_tensors() {
             use_mmap_buffer = create_gemma_tensors(tn, 3); break;
         case LLM_ARCH_GEMMA4:
             use_mmap_buffer = create_gemma4_tensors(tn); break;
-        case LLM_ARCH_STARCODER2:
             use_mmap_buffer = create_starcoder2_tensors(tn); break;
         case LLM_ARCH_MAMBA:
             use_mmap_buffer = create_mamba_tensors(tn); break;
-        case LLM_ARCH_XVERSE:
             use_mmap_buffer = create_xverse_tensors(tn); break;
         case LLM_ARCH_COMMAND_R:
             use_mmap_buffer = create_command_r_tensors(tn); break;
         case LLM_ARCH_OLMO:  // adapted from LLM_ARCH_LLAMA with norm params removed
             use_mmap_buffer = create_olmo_tensors(tn); break;
-        case LLM_ARCH_OPENELM:
             use_mmap_buffer = create_openelm_tensors(tn); break;
         case LLM_ARCH_GPTNEOX:
             use_mmap_buffer = create_gptneox_tensors(tn); break;
@@ -4020,7 +4008,6 @@ bool create_tensors_helper::create_tensors() {
             use_mmap_buffer = create_t5_tensors(tn); break;
         case LLM_ARCH_T5ENCODER:
             use_mmap_buffer = create_tsencoder_tensors(tn); break;
-        case LLM_ARCH_JAIS:
             use_mmap_buffer = create_jais_tensors(tn); break;
         case LLM_ARCH_CHATGLM:
             use_mmap_buffer = create_chatglm_tensors(tn); break;
@@ -4028,7 +4015,6 @@ bool create_tensors_helper::create_tensors() {
             use_mmap_buffer = create_cohere2_tensors(tn); break;
         case LLM_ARCH_GLM4:
             use_mmap_buffer = create_glm4_tensors(tn); break;
-        case LLM_ARCH_DOTS1:
             use_mmap_buffer = create_dots1_tensors(tn); break;
         case LLM_ARCH_ERNIE4_5:
         case LLM_ARCH_ERNIE4_5_MOE:

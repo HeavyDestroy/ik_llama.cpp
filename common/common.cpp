@@ -3198,6 +3198,83 @@ bool fs_create_directory_with_parents(const std::string & path) {
 #endif // _WIN32
 }
 
+// Glob character class matching
+static inline bool glob_class_match(char c, const char * class_start, const char * class_end) {
+    bool negated = (*class_start == '^' || *class_start == '!');
+    if (negated) class_start++;
+    bool matched = false;
+    while (class_start < class_end) {
+        if (class_start[0] == '-' && class_start > class_start && class_start[1] != ']') {
+            // Range: [a-z]
+            if (c >= class_start[-1] && c <= class_start[1]) {
+                matched = true;
+                break;
+            }
+            class_start += 2;
+        } else {
+            // Single character
+            if (c == *class_start) {
+                matched = true;
+                break;
+            }
+            class_start++;
+        }
+    }
+    return negated ? !matched : matched;
+}
+
+// Glob pattern matching (similar to shell globbing)
+// Supports *, **, ?, and [] character classes
+static inline bool glob_match(const char * pattern, const char * str) {
+    if (*pattern == '\0') {
+        return *str == '\0';
+    }
+    if (pattern[0] == '*' && pattern[1] == '*') {
+        const char * p = pattern + 2;
+        if (glob_match(p, str)) return true;
+        if (*str != '\0') return glob_match(pattern, str + 1);
+        return false;
+    }
+    if (*pattern == '*') {
+        const char * p = pattern + 1;
+        for (; *str != '\0' && *str != '/'; str++) {
+            if (glob_match(p, str)) return true;
+        }
+        return glob_match(p, str);
+    }
+    if (*pattern == '?' && *str != '\0' && *str != '/') {
+        return glob_match(pattern + 1, str + 1);
+    }
+    if (*pattern == '[') {
+        const char * class_end = pattern + 1;
+        // If first character after '[' is ']' or '-', treat it as literal
+        if (*class_end == ']' || *class_end == '-') {
+            class_end++;
+        }
+        while (*class_end != '\0' && *class_end != ']') {
+            class_end++;
+        }
+        if (*class_end == ']') {
+            if (*str == '\0') return false;
+            bool matched = glob_class_match(*str, pattern + 1, class_end);
+            return matched && glob_match(class_end + 1, str + 1);
+        } else {
+            if (*str == '[') {
+                return glob_match(pattern + 1, str + 1);
+            }
+            return false;
+        }
+    }
+    if (*pattern == *str) {
+        return glob_match(pattern + 1, str + 1);
+    }
+    return false;
+}
+
+bool glob_match(const std::string & pattern, const std::string & str) {
+    return glob_match(pattern.c_str(), str.c_str());
+}
+
 std::string fs_get_cache_directory() {
     std::string cache_directory = "";
     auto ensure_trailing_slash = [](std::string p) {
