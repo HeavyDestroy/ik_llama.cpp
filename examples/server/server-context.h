@@ -1,5 +1,6 @@
 #include "server-task.h"
 #include "server-queue.h"
+#include "server-checkpoint.h"
 #include "speculative.h"
 #include "json-schema-to-grammar.h"
 #include <nlohmann/json_fwd.hpp>
@@ -115,12 +116,13 @@ struct server_slot {
 
     server_prompt server_cached_prompt;
 
+    // Checkpoint management for context reuse
+    server_checkpoint_manager checkpoint_mgr;
+
     void prompt_save(server_prompt_cache& prompt_cache) const;
 
     void prompt_load(server_prompt_cache& prompt_cache, const server_tokens& tokens);
 
-    size_t checkpoint_pos = 0;
-    bool do_checkpoint = false;
     bool image_just_processed = false;
 
     // sampling
@@ -387,12 +389,6 @@ struct server_context {
 
     // Re-aggregates all active vectors and updates the model state
     bool apply_control_vectors_internal();
-
-    bool create_checkpoint(server_slot & slot);
-
-    void apply_checkpoint(server_slot & slot);
-
-    void create_checkpoint_at_interval(server_slot & slot, const gpt_params & params_base);
 
     void release_slot_after_final_response(server_slot & slot);
 };

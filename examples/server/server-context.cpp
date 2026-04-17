@@ -274,6 +274,14 @@ void server_context::init() {
 
         slot.reset();
 
+        // Initialize checkpoint manager for this slot
+        server_checkpoint_config cp_config;
+        cp_config.max_checkpoints = params_base.ctx_checkpoints_n;
+        cp_config.interval = params_base.ctx_checkpoints_interval;
+        cp_config.min_span = 16;
+        cp_config.tolerance = params_base.ctx_checkpoints_tolerance;
+        slot.checkpoint_mgr.init(ctx, cp_config);
+
         slots.push_back(std::move(slot));
     }
 
@@ -399,9 +407,7 @@ void server_slot::reset() {
     rewind_status = false;
 
     generated_token_probs.clear();
-    checkpoint_pos = 0;
     image_just_processed = false;
-    do_checkpoint = false;
 
     positional_bans.clear();
     ban_phrases.clear();
@@ -3064,135 +3070,6 @@ void server_context::add_sampled_tokens() {
     }
 }
 
-void  server_context::create_checkpoint_at_interval(server_slot & slot, const gpt_params & params_base) {
-    if (params_base.do_checkpoint && params_base.ctx_checkpoints_interval > 0) {
-        auto pos = llama_kv_cache_seq_pos_max(slot.ctx, slot.id);
-        if (slot.checkpoint_pos + params_base.ctx_checkpoints_interval <= 1 + pos) {
-            bool created = create_checkpoint(slot);
-            if (created) {
-                slot.checkpoint_pos = pos;
-            }
-        }
-    }
-}
-
-void server_context::apply_checkpoint(server_slot & slot) {
-    llama_pos pos_next = slot.cache_tokens.pos_next(slot.n_past);
-    const auto pos_min_thold = std::max(0, pos_next - 1);
-    if (slot.n_past > 0 && slot.n_past < slot.cache_tokens.n_tokens()) {
-        int32_t pos_min = llama_kv_cache_seq_pos_min(slot.ctx, slot.id);
-
-        if (pos_min > pos_min_thold) {
-            SLT_WRN(slot, "n_past = %d, slot.prompt.tokens.size() = %d, seq_id = %d, pos_min = %d\n", slot.n_past, (int)slot.cache_tokens.size(), slot.id, pos_min);
-
-            // search for a context checkpoint
-            const auto it = std::find_if(
-                slot.server_cached_prompt.checkpoints.rbegin(),
-                slot.server_cached_prompt.checkpoints.rend(),
-                [&](const auto & cur) {
-                    // guarantee that a checkpoint will result in at least one token being processed [TAG_PROMPT_LOGITS]
-                    return cur.pos_min < pos_min_thold;
-                }
-            );
-
-            bool do_reset = it == slot.server_cached_prompt.checkpoints.rend();
-
-            if (!do_reset) {
-                // restore the context checkpoint
-                const int64_t t_start = ggml_time_us();
-                const size_t checkpoint_size = it->data.size();
-                
-                // For hybrid models, use full state restore (flags=0) to restore the recurrent state
-                const bool is_hybrid = llama_model_is_hybrid(llama_get_model(ctx));
-                const llama_state_seq_flags restore_flags = is_hybrid ? 0 : LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY;
-                
-                const size_t n = llama_state_seq_set_data(ctx, it->data.data(), checkpoint_size, slot.id, restore_flags);
-
-                if (n != checkpoint_size) {
-                    SLT_ERR(slot, "failed to restore context checkpoint (pos_min = %d, pos_max = %d, size = %.3f MiB)\n", it->pos_min, it->pos_max, (float)checkpoint_size / 1024 / 1024);
-                    do_reset = true;
-                    //printf("[DEBUG] `do_reset` was set to `true` after failing to restore a checkpoint");
-                } else {
-                    slot.n_past = std::min(slot.n_past, std::max(it->pos_min+1, it->pos_max));
-                    slot.n_past = slot.cache_tokens.size_up_to_pos(slot.n_past-1);
-                    slot.n_past_prompt = std::min(slot.n_past_prompt, std::max(it->pos_min_prompt+1, it->pos_max_prompt));
-                    slot.n_past_prompt = slot.prompt_tokens.size_up_to_pos(slot.n_past_prompt-1);
-                    SLT_WRN(slot, "restored context checkpoint took  %.2f ms (pos_min = %d, pos_max = %d, size = %.3f MiB, hybrid=%d)\n", (ggml_time_us() - t_start) / 1000.0, it->pos_min, it->pos_max, (float)checkpoint_size / 1024 / 1024, is_hybrid ? 1 : 0);
-                }
-            }
-
-            if (do_reset) {
-                SLT_WRN(slot, "forcing full prompt re-processing due to lack of cache data (likely due to SWA or hybrid/recurrent memory, see %s)\n",
-                    "https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055");
-                slot.n_past = 0;
-                slot.n_past_prompt = 0;
-            }
-        }
-    }
-
-    {
-        // erase any checkpoints with pos_min > pos_min_thold
-        for (auto it = slot.server_cached_prompt.checkpoints.begin(); it != slot.server_cached_prompt.checkpoints.end();) {
-            const auto & cur = *it;
-            if (cur.pos_min > pos_min_thold) {
-                SLT_WRN(slot, "erased invalidated context checkpoint (pos_min = %d, pos_max = %d, size = %.3f MiB)\n", cur.pos_min, cur.pos_max, (float)cur.data.size() / 1024 / 1024);
-                it = slot.server_cached_prompt.checkpoints.erase(it);
-            } else {
-                ++it;
-            }
-        }
-    }
-}
-
-bool server_context::create_checkpoint(server_slot & slot) {
-    bool do_checkpoint = !slot.image_just_processed;
-    int32_t pos_min = llama_kv_cache_seq_pos_min(slot.ctx, slot.id);
-    const auto pos_max = llama_kv_cache_seq_pos_max(slot.ctx, slot.id);
-
-    // no need for empty or small checkpoints
-    do_checkpoint = do_checkpoint && (pos_min >= 0 && pos_max >= 16);
-
-    // no need to create checkpoints that are too close together
-    do_checkpoint = do_checkpoint && (slot.server_cached_prompt.checkpoints.empty() || pos_max > slot.server_cached_prompt.checkpoints.back().pos_max);
-
-    if (do_checkpoint) {
-        const int64_t t_start = ggml_time_us();
-        while (slot.server_cached_prompt.checkpoints.size() >= (size_t)params_base.ctx_checkpoints_n) {
-            // make room for the new checkpoint, if needed
-            const auto & cur = slot.server_cached_prompt.checkpoints.front();
-
-            SLT_WRN(slot, "erasing old context checkpoint (pos_min = %d, pos_max = %d, size = %.3f MiB)\n",
-                cur.pos_min, cur.pos_max, (float)cur.data.size() / 1024 / 1024);
-
-            slot.server_cached_prompt.checkpoints.erase(slot.server_cached_prompt.checkpoints.begin());
-        }
-
-        // For hybrid/recurrent models, we MUST save the full state including KV cache
-        // because the recurrent state (DeltaNet hidden states) is stored in the V-cache.
-        // Using PARTIAL_ONLY would skip the V-cache and lose the recurrent state,
-        // causing crashes when the checkpoint is restored.
-        const bool is_hybrid = llama_model_is_hybrid(llama_get_model(slot.ctx));
-        const llama_state_seq_flags checkpoint_flags = is_hybrid ? 0 : LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY;
-
-        const size_t checkpoint_size = llama_state_seq_get_size(ctx, slot.id, checkpoint_flags);
-
-        auto & cur = slot.server_cached_prompt.checkpoints.emplace_back(server_prompt_checkpoint{
-            /*.pos_min = */ pos_min,
-            /*.pos_max = */ pos_max,
-            /*.pos_min_prompt = */ pos_min + slot.n_past_offset,
-            /*.pos_max_prompt = */ pos_max + slot.n_past_offset ,
-            /*.data    = */ std::vector<uint8_t>(checkpoint_size),
-            });
-
-        llama_state_seq_get_data(ctx, cur.data.data(), checkpoint_size, slot.id, checkpoint_flags);
-
-        SLT_WRN(slot, "created context checkpoint %d of %d (pos_min = %d, pos_max = %d, size = %.3f MiB, took %.2f ms, hybrid=%d)\n",
-            (int)slot.server_cached_prompt.checkpoints.size(), params_base.ctx_checkpoints_n, cur.pos_min, cur.pos_max, (float)cur.data.size() / 1024 / 1024,
-            (ggml_time_us() - t_start) / 1000.0, is_hybrid ? 1 : 0);
-    }
-    return do_checkpoint;
-}
-
 void server_context::batch_pending_prompt(const int32_t n_ubatch, const int32_t n_batch,  int32_t & batch_type) {
     if (params_base.cont_batching || batch.n_tokens == 0) {
         for (auto& slot : slots) {
@@ -3362,7 +3239,16 @@ void server_context::batch_pending_prompt(const int32_t n_ubatch, const int32_t 
                             }
                         }
                     }
-                    apply_checkpoint(slot);
+                    // Try to restore from checkpoint if cache didn't cover enough
+                    llama_pos pos_next = slot.cache_tokens.pos_next(slot.n_past);
+                    int32_t pos_min_thold = std::max(0, pos_next - 1);
+                    if (slot.n_past > 0 && slot.n_past < slot.cache_tokens.n_tokens()) {
+                        int32_t pos_min = llama_kv_cache_seq_pos_min(slot.ctx, slot.id);
+                        if (pos_min > pos_min_thold) {
+                            slot.checkpoint_mgr.restore(slot, pos_min_thold);
+                        }
+                    }
+                    slot.checkpoint_mgr.invalidate_old_checkpoints(pos_min_thold);
                     if (slot.n_past_prompt == slot.n_prompt_tokens && slot.n_past_prompt > 0) {
                         // we have to evaluate at least 1 token to generate logits.
                         LOG_INFO("we have to evaluate at least 1 token to generate logits", {
@@ -3490,8 +3376,9 @@ void server_context::batch_pending_prompt(const int32_t n_ubatch, const int32_t 
                     slot.n_past_prompt++;
                     slot.n_past++;
                     slot.image_just_processed = false;
+                    // Checkpoint creation is now handled by the checkpoint manager
+                    // at interval boundaries, no need for the do_checkpoint flag
                     if (params_base.do_checkpoint && slot.n_prompt_tokens - slot.n_past_prompt == params_base.ctx_checkpoints_tolerance) {
-                        slot.do_checkpoint = true;
                         break;
                     }
                     
@@ -3682,7 +3569,7 @@ bool server_context::accept_special_token(const server_slot& slot, const  llama_
 void server_context::release_slot_after_final_response(server_slot & slot) {
     slot.print_timings();
     if (params_base.do_checkpoint) {
-        create_checkpoint(slot);
+        slot.checkpoint_mgr.create(slot);
     }
     slot.release();
     slot.released = true;
@@ -4033,12 +3920,14 @@ void server_context::process_batch_tokens(int32_t & n_batch) {
             bool is_active_slot = (slot.state == SLOT_STATE_PROCESSING);
 
             if (!is_active_slot || slot.i_batch < (int)i || slot.i_batch >= (int)(i + n_tokens)) {
-                // save checkpoint during prompt processing
-                if (slot.command == SLOT_COMMAND_LOAD_PROMPT) {
-                    if (slot.do_checkpoint) {
-                        create_checkpoint(slot);
+                // Create checkpoint during prompt processing if enabled
+                if (slot.command == SLOT_COMMAND_LOAD_PROMPT && params_base.do_checkpoint) {
+                    // Check if we've exceeded the tolerance threshold
+                    if (slot.n_prompt_tokens - slot.n_past_prompt == params_base.ctx_checkpoints_tolerance) {
+                        slot.checkpoint_mgr.create(slot);
                     } else {
-                        create_checkpoint_at_interval(slot, params_base);
+                        int32_t current_pos = llama_kv_cache_seq_pos_max(slot.ctx, slot.id);
+                        slot.checkpoint_mgr.create_if_interval_elapsed(slot, current_pos);
                     }
                 }
                 continue; // continue loop of slots
@@ -4094,15 +3983,16 @@ void server_context::process_batch_tokens(int32_t & n_batch) {
                 slot.t_start_generation = ggml_time_us();
                 slot.t_prompt_processing = (slot.t_start_generation - slot.t_start_process_prompt) / 1e3;
                 metrics.on_prompt_eval(slot);
-                // create checkpoint after prompt processing ends
-                if (params_base.ctx_checkpoints_tolerance<=0 && params_base.do_checkpoint) {
-                    create_checkpoint(slot);
+                // Create checkpoint after prompt processing ends
+                if (params_base.ctx_checkpoints_tolerance <= 0 && params_base.do_checkpoint) {
+                    slot.checkpoint_mgr.create(slot);
                 }
             }
 
-            // create checkpoint during generation
-            if (slot.n_decoded > 1) {
-                create_checkpoint_at_interval(slot, params_base);
+            // Create checkpoint during generation at intervals
+            if (slot.n_decoded > 1 && params_base.do_checkpoint) {
+                int32_t current_pos = llama_kv_cache_seq_pos_max(slot.ctx, slot.id);
+                slot.checkpoint_mgr.create_if_interval_elapsed(slot, current_pos);
             }
 
             slot.t_token_generation = std::max<int64_t>(1, t_current - slot.t_start_generation) / 1e3;

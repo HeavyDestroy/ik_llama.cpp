@@ -21,6 +21,8 @@ set(TARGET_SRCS
     server-common.h
     server-context.cpp
     server-context.h
+    server-checkpoint.cpp
+    server-checkpoint.h
     server-tools.cpp
     server-tools.h
 )
