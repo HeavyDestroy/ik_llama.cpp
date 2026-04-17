@@ -1254,21 +1254,66 @@ int main(int argc, char ** argv) {
     };
 
     const auto handle_models = [&params, &model_meta](const httplib::Request & req, httplib::Response & res) {
-        json models = {
-            {"object", "list"},
-            {"data", {
-                 {
-                     {"id",       params.model_alias},
-                     {"object",   "model"},
-                     {"created",  std::time(0)},
-                     {"owned_by", "llamacpp"},
-                     {"meta",     model_meta},
-                     {"max_model_len", params.n_ctx}, //vllm specs
-                 },
-             }}
-        };
+        try {
+            // Build permissions array (OpenAI-compatible)
+            json permissions = json::array();
+            permissions.push_back(json {
+                {"id", "model-permission-1"},
+                {"object", "model_permission"},
+                {"created", std::time(0)},
+                {"allow_create_engine", false},
+                {"allow_sampling", true},
+                {"allow_logprobs", true},
+                {"allow_search_indices", false},
+                {"allow_view", true},
+                {"allow_fine_tuning", false},
+                {"organization", "llamacpp"},
+                {"group", nullptr},
+                {"is_blocking", false}
+            });
 
-        res.set_content(models.dump(), "application/json; charset=utf-8");
+            // Model status/context - mirrors mainline's server_model_status
+            json status = {
+                {"value", "loaded"},        // model is loaded and ready
+                {"args", json::array()},    // runtime args (empty for single-model)
+            };
+
+            json models = {
+                {"object", "list"},
+                {"data", {
+                    {
+                        {"id",       params.model_alias},
+                        {"object",   "model"},
+                        {"created",  std::time(0)},
+                        {"owned_by", "llamacpp"},
+                        {"root",     nullptr},
+                        {"permission", permissions},
+                        {"aliases",  json::array()},
+                        {"tags",     json::array()},
+                        {"status",   status},              // model loading state
+                        {"context",  params.n_ctx},        // context window size
+                        {"max_model_len", params.n_ctx},   // vllm compat
+                        {"meta",     model_meta},
+                    }
+                }}
+            };
+
+            res.status = 200;
+            res.set_content(models.dump(), "application/json; charset=utf-8");
+        } catch (const std::exception & e) {
+            res.status = 500;
+            res.set_content(
+                safe_json_to_str(json {
+                    {"error", {
+                        {"message", "Internal server error while listing models: " + std::string(e.what())},
+                        {"type", "server_error"},
+                        {"code", 500}
+                    }}
+                }),
+                "application/json; charset=utf-8"
+            );
+            LOG_ERR("%s: %s\n", __func__, e.what());
+        }
     };
 
 
@@ -2078,6 +2123,40 @@ int main(int argc, char ** argv) {
         svr->Post("/delete_prompt",   delete_saved_prompt);
         svr->Post("/rename_prompt",   rename_saved_prompt);
 
+    }
+
+    // Built-in tools
+    if (!params.server_tools.empty()) {
+        SRV_WRN("%s", "Built-in tools are enabled, do not expose server to untrusted environments\n");
+        svr->Get ("/tools", [&ctx_server](const httplib::Request& req, httplib::Response& res) {
+            try {
+                json result;
+                for (const auto& tool : ctx_server.tools.tools) {
+                    result.push_back(tool->to_json());
+                }
+                res.status = 200;
+                res.set_content(result.dump(), "application/json");
+            } catch (const std::exception& e) {
+                res.status = 500;
+                res.set_content(std::string("{\"error\":\"\"") + e.what() + "\"}", "application/json");
+            }
+        });
+        svr->Post("/tools", [&ctx_server](const httplib::Request& req, httplib::Response& res) {
+            try {
+                json body = json::parse(req.body);
+                std::string tool_name = body.at("tool").get<std::string>();
+                json params_json = body.value("params", json::object());
+                json result = ctx_server.tools.invoke(tool_name, params_json);
+                res.status = 200;
+                res.set_content(result.dump(), "application/json");
+            } catch (const json::exception& e) {
+                res.status = 400;
+                res.set_content(std::string("{\"error\":\"\"") + e.what() + "\"}", "application/json");
+            } catch (const std::exception& e) {
+                res.status = 500;
+                res.set_content(std::string("{\"error\":\"\"") + e.what() + "\"}", "application/json");
+            }
+        });
     }
 
     svr->Get ("/version", handle_version);
