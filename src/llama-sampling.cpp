@@ -1281,6 +1281,13 @@ void llama_sampler_reset(struct llama_sampler* smpl) {
     }
 }
 
+void llama_sampler_free(struct llama_sampler * smpl) {
+    if (smpl->iface->free) {
+        smpl->iface->free(smpl);
+    }
+    delete smpl;
+}
+
 // Fwd declare to break reset --> init_impl --> llama_sampler_grammar_i --> reset cycle.
 static struct llama_grammar* llama_sampler_init_grammar_impl(
     const struct llama_vocab* vocab,

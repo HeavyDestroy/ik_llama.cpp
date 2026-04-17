@@ -4919,6 +4919,11 @@ void llama_lora_adapter_free(struct llama_lora_adapter * adapter) {
     delete adapter;
 }
 
+// Upstream compatibility wrapper
+void llama_adapter_lora_free(llama_adapter_lora * adapter) {
+    llama_lora_adapter_free(adapter);
+}
+
 //
 // interface implementation
 //
@@ -5248,6 +5253,11 @@ struct llama_model * llama_model_load_from_file(
 
 void llama_free_model(struct llama_model * model) {
     delete model;
+}
+
+// Upstream compatibility wrapper
+void llama_model_free(struct llama_model * model) {
+    llama_free_model(model);
 }
 
 static void llama_repack_up_gate_exps(llama_context & lctx) {

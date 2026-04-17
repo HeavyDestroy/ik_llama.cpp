@@ -561,6 +561,8 @@ extern "C" {
 
     // lora adapter
     struct llama_lora_adapter;
+    // Alias for upstream compatibility
+    typedef struct llama_lora_adapter llama_adapter_lora;
 
     // Helpers for getting default parameters
     LLAMA_API struct llama_model_params llama_model_default_params(void);
@@ -583,6 +585,7 @@ extern "C" {
             struct llama_model_params     params);
 
     LLAMA_API void llama_free_model(struct llama_model * model);
+    LLAMA_API void llama_model_free(struct llama_model * model);
 
     LLAMA_API struct llama_context * llama_init_from_model(
                      struct llama_model * model,
@@ -715,6 +718,7 @@ extern "C" {
     // Manually free a LoRA adapter
     // Note: loaded adapters will be free when the associated model is deleted
     LLAMA_API void llama_lora_adapter_free(struct llama_lora_adapter * adapter);
+    LLAMA_API void llama_adapter_lora_free(llama_adapter_lora * adapter);
 
     // Apply a loaded control vector to a llama_context, or if data is NULL, clear
     // the currently loaded vector.
@@ -1371,6 +1375,7 @@ extern "C" {
 
 
 LLAMA_API void                   llama_sampler_reset(struct llama_sampler* smpl);
+LLAMA_API void                   llama_sampler_free (struct llama_sampler * smpl);
 
 /// @details Intializes a GBNF grammar, see grammars/README.md for details.
 /// @param vocab The vocabulary that this grammar will be used with.
