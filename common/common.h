@@ -385,6 +385,16 @@ struct gpt_params {
     int  fused_delta_net   = 0;     // use fused delta-net if number of tokens in the batch is less than this value
     bool has_mtp           = false; // enable MTP if supported by the model
 
+    // KV-Direct + TriAttention
+    bool kv_direct_tri_enable       = false;
+    uint32_t kv_direct_tri_window   = 2048;
+    uint32_t kv_direct_tri_budget   = 8192;
+    float    kv_direct_tri_alpha    = 0.7f;
+    uint32_t kv_direct_tri_prune_interval = 128;
+    bool     kv_direct_tri_protect_prefill = true;
+    int      kv_direct_tri_hybrid_stride = 4;
+    std::string kv_direct_tri_stats_path = "";
+
     std::string cache_type_k = "f16"; // KV cache data type for the K
     std::string cache_type_v = "f16"; // KV cache data type for the V
 

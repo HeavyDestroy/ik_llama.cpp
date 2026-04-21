@@ -18,12 +18,29 @@ struct llama_kv_cell {
 
     std::set<llama_seq_id> seq_id;
 
-    bool has_seq_id(const llama_seq_id & id) const {
-        return seq_id.find(id) != seq_id.end();
-    }
+#ifdef LLAMA_KV_DIRECT_TRIATTN
+    // Residual checkpoint (CPU-offloaded)
+    void * residual_ptr;            // Pointer into residual_buffer
+    bool has_residual;              // Flag: is residual stored for this token?
+    bool is_attention_layer;        // Skip scoring for Mamba/GDN layers
+
+    // TriAttention metadata (precomputed during prefill)
+    float tri_score;                // Combined S_trig + S_norm score
+    float concentration_metric;     // Mean Resultant Length R for adaptive weighting
+    llama_pos absolute_pos;         // For RoPE recomputation
+    int32_t layer_idx;              // Which layer this residual belongs to
+#endif
 
     bool is_empty() const {
-        return seq_id.empty();
+#ifdef LLAMA_KV_DIRECT_TRIATTN
+        return pos < 0 && !has_residual;
+#else
+        return pos < 0;
+#endif
+    }
+
+    bool has_seq_id(const llama_seq_id & id) const {
+        return seq_id.find(id) != seq_id.end();
     }
 
     bool is_same_seq(const llama_kv_cell & other) const {
@@ -66,6 +83,48 @@ struct llama_kv_cache {
     std::vector<struct ggml_context *> ctxs;
     std::vector<ggml_backend_buffer_t> bufs;
 
+#ifdef LLAMA_KV_DIRECT_TRIATTN
+    // Residual storage buffer (CPU RAM)
+    std::vector<uint8_t> residual_buffer;
+    size_t residual_stride;         // bytes per residual vector
+    ggml_type residual_dtype;
+
+    // TriAttention runtime state
+    bool enable_triattention;
+    uint32_t recompute_window;      // Keep last N tokens in standard KV cache
+    uint32_t triattn_budget;
+    float triattn_alpha;
+    uint32_t prune_interval;
+    uint32_t tokens_since_prune;
+    bool protect_prefill;
+    llama_pos prefill_end_pos;      // Last position of initial prefill
+
+    // Hybrid layer detection
+    std::vector<int> attention_layer_indices;
+    int hybrid_stride;
+
+    // Precomputed TriAttention stats (loaded from calibration file)
+    struct TriAttentionLayerStats {
+        int n_freq_bands;
+        std::vector<float> q_center_norm;
+        std::vector<float> k_center_norm;
+        std::vector<float> q_center_phase;
+        std::vector<float> k_center_phase;
+        std::vector<float> q_norm_mean;
+        std::vector<float> k_norm_mean;
+        std::vector<float> mrl;  // Mean Resultant Length per band
+        bool is_attention;
+    };
+    std::unordered_map<int, TriAttentionLayerStats> layer_stats;
+
+    // Pruning bookkeeping
+    std::vector<bool> residual_retained;  // Which residuals to keep after prune
+    float tri_score_threshold;            // Score cutoff for gated recompute
+
+    // Temporary graph tensors holding CPU-synced residuals (cleared each decode)
+    std::vector<ggml_tensor *> residual_graph_tensors;
+#endif
+
     size_t total_size() const {
         size_t size = 0;
         for (ggml_backend_buffer_t buf : bufs) {
@@ -83,6 +142,12 @@ struct llama_kv_cache {
         }
     }
 };
+
+// Forward declarations for TriAttention helpers
+#ifdef LLAMA_KV_DIRECT_TRIATTN
+float residual_norm_in_band(const float * residual, int band_idx, int n_embd, int n_bands);
+void compact_residual_buffer(struct llama_kv_cache * kv);
+#endif
 
 struct llama_control_vector {
     std::vector<struct ggml_tensor *> tensors; // per layer

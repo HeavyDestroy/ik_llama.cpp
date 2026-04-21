@@ -714,6 +714,16 @@ static inline bool llama_kv_qnext_seq_id_in_range(const llama_kv_cache & cache, 
     return n_slots > 0 && seq_id >= 0 && (uint32_t) seq_id < n_slots;
 }
 
+#ifdef LLAMA_KV_DIRECT_TRIATTN
+void llama_kv_cache_prune_residuals(struct llama_kv_cache * kv);
+bool llama_layer_uses_attention(const llama_model & model, int layer_idx);
+float compute_triattention_score(
+    const llama_kv_cache::TriAttentionLayerStats & stats,
+    const float * residual_data,
+    int n_embd,
+    float alpha);
+#endif
+
 static bool llama_kv_cache_init(
              struct llama_kv_cache & cache,
                const llama_context * ctx,
@@ -4164,6 +4174,66 @@ static int llama_decode_internal(
             }
         }
 
+#ifdef LLAMA_KV_DIRECT_TRIATTN
+// Extract per-token residuals from CPU-synced graph tensors
+if (kv_self.enable_triattention && !kv_self.recurrent && !kv_self.residual_graph_tensors.empty()) {
+    for (int il = 0; il < (int)kv_self.residual_graph_tensors.size(); ++il) {
+        ggml_tensor * cpu_tensor = kv_self.residual_graph_tensors[il];
+        if (!cpu_tensor) continue;
+
+        // cpu_tensor->data holds [n_embd, n_tokens] in F32
+        const float * res_data = (const float *)cpu_tensor->data;
+        const int n_embd = cpu_tensor->ne[0];
+        const int n_tok  = cpu_tensor->ne[1];
+
+        for (int i = 0; i < n_tok; ++i) {
+            const llama_pos pos = u_batch.pos[i];
+            const uint32_t cell_idx = kv_self.head - n_tokens + i;
+            if (cell_idx >= kv_self.cells.size()) continue;
+
+            auto & cell = kv_self.cells[cell_idx];
+            
+            // Map to pre-allocated residual buffer
+            void * dst = kv_self.residual_buffer.data() + 
+                        cell_idx * kv_self.residual_stride;
+            
+            // Copy F32 → target dtype (F16/F32)
+            if (kv_self.residual_dtype == GGML_TYPE_F16) {
+                ggml_fp32_to_fp16_row(res_data + i * n_embd, (ggml_fp16_t *)dst, n_embd);
+            } else {
+                memcpy(dst, res_data + i * n_embd, n_embd * sizeof(float));
+            }
+
+            // Update cell metadata
+            cell.residual_ptr = dst;
+            cell.has_residual = true;
+            cell.is_attention_layer = true;
+            cell.absolute_pos = pos;
+            cell.layer_idx = il;
+
+            // Compute TriAttention score if stats available
+            if (!kv_self.layer_stats.empty()) {
+                auto it = kv_self.layer_stats.find(il);
+                if (it != kv_self.layer_stats.end() && it->second.is_attention) {
+                    float res_f32[8192]; // Max n_embd safety buffer
+                    if (kv_self.residual_dtype == GGML_TYPE_F16) {
+                        ggml_fp16_to_fp32_row((const ggml_fp16_t *)dst, res_f32, n_embd);
+                    } else {
+                        memcpy(res_f32, dst, n_embd * sizeof(float));
+                    }
+                    cell.tri_score = compute_triattention_score(
+                        it->second, res_f32, n_embd, kv_self.triattn_alpha);
+                }
+            }
+        }
+    }
+
+    // Clear graph tensor pointers for next decode
+    std::fill(kv_self.residual_graph_tensors.begin(), 
+              kv_self.residual_graph_tensors.end(), nullptr);
+}
+#endif
+
         // plot the computation graph in dot format (for debugging purposes)
         //if (n_past%100 == 0) {
         //    ggml_graph_dump_dot(gf, NULL, "llama.dot");
@@ -4800,8 +4870,149 @@ static int32_t llama_kv_cache_update_internal(struct llama_context & lctx) {
             LLAMA_LOG_ERROR("%s: failed to allocate compute buffers\n", __func__);
         }
     }
+
+#ifdef LLAMA_KV_DIRECT_TRIATTN
+    // Periodic pruning trigger
+    if (lctx.kv_self.enable_triattention) {
+        lctx.kv_self.tokens_since_prune += lctx.cparams.n_ubatch;
+        if (lctx.kv_self.tokens_since_prune >= lctx.kv_self.prune_interval) {
+            llama_kv_cache_prune_residuals(&lctx.kv_self);
+            lctx.kv_self.tokens_since_prune = 0;
+        }
+    }
+#endif
+
     return 0;
 }
+
+#ifdef LLAMA_KV_DIRECT_TRIATTN
+// Runs synchronously to patch evicted KV slots before graph compute
+static void llama_kv_direct_sync_evicted_kv(
+    struct llama_context & lctx,
+    int il)
+{
+    auto & kv = lctx.kv_self;
+    auto & model = lctx.model;
+    auto & hparams = model.hparams;
+
+    if (!kv.enable_triattention || kv.recurrent) return;
+    if (!llama_layer_uses_attention(model, il)) return;
+
+    uint32_t n_embd_k = hparams.n_embd_k_gqa(il);
+    uint32_t n_embd_v = hparams.n_embd_v_gqa(il);
+    if (il >= (int)kv.k_l.size() || il >= (int)kv.v_l.size()) return;
+
+    ggml_tensor * k_cache = kv.k_l[il];
+    ggml_tensor * v_cache = kv.v_l[il];
+    if (!k_cache || !v_cache) return;
+
+    // Create tiny scratch context for recompute ops
+    struct ggml_init_params params = {
+        .mem_size   = ggml_tensor_overhead() * 16 + ggml_graph_overhead(),
+        .mem_buffer = nullptr,
+        .no_alloc   = true,
+    };
+    struct ggml_context * ctx_scratch = ggml_init(params);
+
+    for (uint32_t i = kv.recompute_window; i < kv.head; ++i) {
+        uint32_t cell_idx = i;
+        if (cell_idx >= kv.cells.size()) continue;
+
+        auto & cell = kv.cells[cell_idx];
+        if (!cell.has_residual || cell.tri_score < kv.tri_score_threshold) continue;
+
+        // Load residual into scratch tensor
+        ggml_tensor * res = ggml_new_tensor_1d(ctx_scratch, kv.residual_dtype, hparams.n_embd);
+        ggml_backend_tensor_set(res, cell.residual_ptr, 0, ggml_nbytes(res));
+
+        // RMSNorm + Linear Proj
+        ggml_tensor * h = ggml_rms_norm(ctx_scratch, res, hparams.f_norm_eps);
+        ggml_tensor * k_re = ggml_mul_mat(ctx_scratch, model.layers[il].wk, h);
+        ggml_tensor * v_re = ggml_mul_mat(ctx_scratch, model.layers[il].wv, h);
+
+        // RoPE
+        if (hparams.rope_type != LLAMA_ROPE_TYPE_NONE) {
+            ggml_tensor * pos = ggml_new_tensor_1d(ctx_scratch, GGML_TYPE_I32, 1);
+            int32_t p = cell.absolute_pos;
+            ggml_backend_tensor_set(pos, &p, 0, sizeof(int32_t));
+
+            k_re = ggml_rope_ext(
+                ctx_scratch, k_re, pos, nullptr,
+                hparams.n_rot, hparams.rope_type, hparams.n_ctx_train,
+                hparams.rope_freq_base_train, hparams.rope_freq_scale_train,
+                hparams.yarn_ext_factor, hparams.yarn_attn_factor,
+                hparams.yarn_beta_fast, hparams.yarn_beta_slow);
+        }
+
+        // Write back to cache buffers
+        ggml_tensor * k_slot = ggml_view_1d(ctx_scratch, k_cache, n_embd_k,
+            cell_idx * ggml_row_size(k_cache->type, n_embd_k));
+        ggml_tensor * v_slot = ggml_view_1d(ctx_scratch, v_cache, n_embd_v,
+            cell_idx * ggml_row_size(v_cache->type, n_embd_v));
+
+        ggml_backend_tensor_copy(k_re, k_slot);
+        ggml_backend_tensor_copy(v_re, v_slot);
+    }
+
+    ggml_free(ctx_scratch);
+}
+#endif
+
+#ifdef LLAMA_KV_DIRECT_TRIATTN
+// KV-Direct + TriAttention: Recompute K/V from residuals for evicted tokens
+// This is called AFTER the graph is built, to restore evicted KV entries
+static void llama_kv_direct_recompute_evicted(
+    llama_context & lctx,
+    uint32_t recompute_window)
+{
+    auto & kv = lctx.kv_self;
+    auto & model = lctx.model;
+    auto & hparams = model.hparams;
+
+    if (!kv.enable_triattention || kv.head <= recompute_window) return;
+
+    // For each attention layer, recompute K/V from residuals
+    for (int il = 0; il < hparams.n_layer; ++il) {
+        // Skip non-attention layers (hybrid models)
+        bool is_attn = true;
+        if (!kv.attention_layer_indices.empty()) {
+            is_attn = std::find(kv.attention_layer_indices.begin(),
+                               kv.attention_layer_indices.end(), il)
+                     != kv.attention_layer_indices.end();
+        } else if (kv.hybrid_stride > 0) {
+            is_attn = (il % kv.hybrid_stride == 0);
+        } else {
+            is_attn = (model.layers[il].wk != nullptr);
+        }
+        if (!is_attn) continue;
+
+        // Get this layer's KV tensors
+        if (il >= (int)kv.k_l.size() || il >= (int)kv.v_l.size()) continue;
+        ggml_tensor * k_layer = kv.k_l[il];
+        ggml_tensor * v_layer = kv.v_l[il];
+        if (!k_layer || !v_layer) continue;
+
+        // Process evicted tokens (beyond recompute_window)
+        for (uint32_t i = recompute_window; i < kv.head; ++i) {
+            auto & cell = kv.cells[i];
+            if (!cell.has_residual) continue;
+
+            // TriAttention gate: skip if score too low
+            if (cell.tri_score < kv.tri_score_threshold) continue;
+
+            // TODO: Recompute K/V from residual
+            // This requires loading the residual, applying RMSNorm + linear proj,
+            // and applying RoPE with the stored absolute position.
+            // The actual implementation needs to be integrated into the graph
+            // builder for each architecture to capture residuals during forward pass.
+
+            // Placeholder: mark for recompute in the next graph build
+            LLAMA_LOG_DEBUG("KV-Direct: recompute token %u layer %d (score: %.3f)\n",
+                           i, il, cell.tri_score);
+        }
+    }
+}
+#endif
 
 static void llama_lora_adapter_init_internal(struct llama_model * model, const char * path_lora, struct llama_lora_adapter & adapter) {
     LLAMA_LOG_INFO("%s: loading lora adapter from '%s' ...\n", __func__, path_lora);
@@ -5976,6 +6187,100 @@ struct llama_context * llama_init_from_model(
 
     return ctx;
 }
+
+#ifdef LLAMA_KV_DIRECT_TRIATTN
+// Load TriAttention stats from simple binary format
+static bool llama_load_triattention_stats(
+    llama_kv_cache * kv,
+    const std::string & stats_path)
+{
+    FILE * f = fopen(stats_path.c_str(), "rb");
+    if (!f) {
+        LLAMA_LOG_ERROR("Failed to open TriAttention stats: %s\n", stats_path.c_str());
+        return false;
+    }
+
+    int n_layers;
+    if (fread(&n_layers, sizeof(int), 1, f) != 1) { fclose(f); return false; }
+
+    for (int i = 0; i < n_layers; ++i) {
+        int layer_idx;
+        if (fread(&layer_idx, sizeof(int), 1, f) != 1) { fclose(f); return false; }
+
+        llama_kv_cache::TriAttentionLayerStats stats;
+        if (fread(&stats.n_freq_bands, sizeof(int), 1, f) != 1) { fclose(f); return false; }
+
+        stats.q_center_norm.resize(stats.n_freq_bands);
+        stats.k_center_norm.resize(stats.n_freq_bands);
+        stats.q_center_phase.resize(stats.n_freq_bands);
+        stats.k_center_phase.resize(stats.n_freq_bands);
+        stats.q_norm_mean.resize(stats.n_freq_bands);
+        stats.k_norm_mean.resize(stats.n_freq_bands);
+        stats.mrl.resize(stats.n_freq_bands);
+
+        fread(stats.q_center_norm.data(), sizeof(float), stats.n_freq_bands, f);
+        fread(stats.k_center_norm.data(), sizeof(float), stats.n_freq_bands, f);
+        fread(stats.q_center_phase.data(), sizeof(float), stats.n_freq_bands, f);
+        fread(stats.k_center_phase.data(), sizeof(float), stats.n_freq_bands, f);
+        fread(stats.q_norm_mean.data(), sizeof(float), stats.n_freq_bands, f);
+        fread(stats.k_norm_mean.data(), sizeof(float), stats.n_freq_bands, f);
+        fread(stats.mrl.data(), sizeof(float), stats.n_freq_bands, f);
+        fread(&stats.is_attention, sizeof(bool), 1, f);
+
+        kv->layer_stats[layer_idx] = stats;
+    }
+    fclose(f);
+    LLAMA_LOG_INFO("Loaded TriAttention stats for %d layers\n", n_layers);
+    return true;
+}
+
+void llama_kv_cache_set_direct_tri_params(
+    struct llama_context * ctx,
+    const struct llama_kv_direct_tri_params * params)
+{
+    if (!params || !ctx) return;
+    auto & kv = ctx->kv_self;
+
+    kv.enable_triattention = params->enable;
+    if (!params->enable) return;
+
+    // Basic params
+    kv.recompute_window = params->recompute_window > 0 ? params->recompute_window : 2048;
+    kv.triattn_budget = params->triattn_budget > 0 ? params->triattn_budget : 8192;
+    kv.triattn_alpha = fminf(fmaxf(params->triattn_alpha, 0.0f), 1.0f);
+    kv.prune_interval = params->prune_interval > 0 ? params->prune_interval : 128;
+    kv.protect_prefill = params->protect_prefill;
+    kv.residual_dtype = params->residual_dtype != GGML_TYPE_COUNT ? params->residual_dtype : GGML_TYPE_F16;
+    kv.tri_score_threshold = params->tri_score_threshold > 0 ? params->tri_score_threshold : 0.3f;
+
+    // Hybrid architecture
+    kv.attention_layer_indices = params->attention_layer_indices;
+    kv.hybrid_stride = params->hybrid_stride > 0 ? params->hybrid_stride : 4;  // Qwen3.5 default
+
+    // Load TriAttention stats only if path is provided and non-empty
+    if (!params->triattn_stats_path.empty()) {
+        llama_load_triattention_stats(&kv, params->triattn_stats_path);
+    } else {
+        LLAMA_LOG_INFO("No TriAttention stats file provided; using online calibration fallback\n");
+    }
+
+    // Allocate residual buffer
+    const size_t residual_bytes = ggml_type_size(kv.residual_dtype) * ctx->model.hparams.n_embd;
+    kv.residual_stride = residual_bytes;
+    kv.residual_buffer.resize(ctx->cparams.n_ctx * residual_bytes);
+    kv.residual_retained.resize(ctx->cparams.n_ctx);
+
+    // Initialize cell metadata
+    for (auto & cell : kv.cells) {
+        cell.has_residual = false;
+        cell.is_attention_layer = true;  // Default; refined during prefill
+        cell.tri_score = 0.0f;
+    }
+
+    LLAMA_LOG_INFO("KV-Direct+TriAttention enabled: residual buffer = %.2f GB, budget = %u\n",
+                  kv.residual_buffer.size() / 1e9, kv.triattn_budget);
+}
+#endif
 
 void llama_free(struct llama_context * ctx) {
     delete ctx;

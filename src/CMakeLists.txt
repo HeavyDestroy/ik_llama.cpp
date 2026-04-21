@@ -119,6 +119,15 @@ add_library(llama
             graphs/build_smollm3.cpp
             )
 
+if(LLAMA_KV_DIRECT_TRIATTN)
+    target_sources(llama PRIVATE
+        llama-hybrid.cpp
+        triattention/scoring.cpp
+        triattention/calibration.cpp
+    )
+    target_link_libraries(llama PRIVATE m)  # For trig functions
+endif()
+
 target_include_directories(llama PUBLIC . ../include)
 target_include_directories(llama PRIVATE ../ggml/src)
 target_compile_features   (llama PUBLIC cxx_std_17)

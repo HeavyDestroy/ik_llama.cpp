@@ -3,6 +3,9 @@
 #include "../llama-context.h"
 #include "../llama-delta-net.h"
 
+// Forward declaration from llama-hybrid.cpp
+bool llama_layer_uses_attention(const llama_model & model, int layer_idx);
+
 ggml_cgraph * llm_build_context::build_qwen35moe() {
 
     struct ggml_cgraph * gf = ggml_new_graph_custom(ctx0, model.max_nodes(n_tokens), false);
@@ -92,6 +95,30 @@ ggml_cgraph * llm_build_context::build_qwen35() {
             cur = build_std_attention(gf, model.layers[il].attn_norm, inpL, inp_pos, il == n_layer - 1 ? inp_out_ids : nullptr, nullptr,
                     KQ_mask, nullptr, nullptr, KQ_scale, 0.0f, 0, il, true, false, true, false, true);
         }
+
+#ifdef LLAMA_KV_DIRECT_TRIATTN
+if (lctx.kv_self.enable_triattention && !lctx.kv_self.recurrent) {
+    if (llama_layer_uses_attention(model, il)) {
+        // cur is [n_embd, n_tokens] — residual after attention, before FFN
+        // Create CPU-backed tensor for async GPU→CPU copy
+        // Use cur's actual shape to avoid size mismatches
+        ggml_tensor * residual_cpu = ggml_new_tensor_2d(
+            ctx0, GGML_TYPE_F32, cur->ne[0], cur->ne[1]);
+        ggml_format_name(residual_cpu, "kv_direct_res_il%d", il);
+        // Force CPU backend via scheduler
+        ggml_backend_sched_set_tensor_backend(lctx.sched, residual_cpu, lctx.backend_cpu);
+
+        ggml_cpy(ctx0, cur, residual_cpu);
+        ggml_build_forward_expand(gf, residual_cpu);
+
+        // Store for post-compute extraction
+        if (il >= (int)lctx.kv_self.residual_graph_tensors.size()) {
+            lctx.kv_self.residual_graph_tensors.resize(model.hparams.n_layer, nullptr);
+        }
+        lctx.kv_self.residual_graph_tensors[il] = residual_cpu;
+    }
+}
+#endif
 
         cur = llm_build_ffn(ctx0, lctx, model.layers[il].ffn_norm, cur,
                 model.layers[il].ffn_up,   NULL, NULL,

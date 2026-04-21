@@ -75,6 +75,12 @@ option(LLAMA_SANITIZE_THREAD    "llama: enable thread sanitizer"    OFF)
 option(LLAMA_SANITIZE_ADDRESS   "llama: enable address sanitizer"   OFF)
 option(LLAMA_SANITIZE_UNDEFINED "llama: enable undefined sanitizer" OFF)
 
+# KV-Direct + TriAttention support
+option(LLAMA_KV_DIRECT_TRIATTN "Enable KV-Direct residual checkpointing + TriAttention scoring" OFF)
+if(LLAMA_KV_DIRECT_TRIATTN)
+    add_definitions(-DLLAMA_KV_DIRECT_TRIATTN)
+endif()
+
 # extra artifacts
 option(LLAMA_BUILD_TESTS    "llama: build tests"          ${LLAMA_STANDALONE})
 option(LLAMA_BUILD_EXAMPLES "llama: build examples"       ${LLAMA_STANDALONE})

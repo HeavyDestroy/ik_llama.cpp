@@ -13,6 +13,8 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <vector>
+#include <string>
 #include <stdio.h>
 #include <stdbool.h>
 
@@ -1535,6 +1537,35 @@ LLAMA_API struct llama_grammar* llama_sampler_init_grammar_lazy_patterns(
     LLAMA_API void llama_set_mtp_op_type(struct llama_context * ctx, enum llama_mtp_op_type mtp_op_type);
 
     LLAMA_API void llama_set_draft_input_hidden_state(struct llama_context * ctx, const float * hidden_state);
+
+    //
+    // KV-Direct + TriAttention
+    //
+
+    struct llama_kv_direct_tri_params {
+        bool enable;                    // Enable residual checkpointing + TriAttention
+        uint32_t recompute_window;      // Keep last N tokens in standard KV cache (default: 2048)
+        uint32_t triattn_budget;        // Max residuals to retain by score (default: 8192)
+        float triattn_alpha;            // Weight: S_trig (0.0-1.0), default: 0.7
+        uint32_t prune_interval;        // Run pruning every N new tokens (default: 128)
+        bool protect_prefill;           // Never evict initial prompt residuals (default: true)
+        ggml_type residual_dtype;       // F16/F32 for residual storage (default: GGML_TYPE_F16)
+
+        // Hybrid architecture support (Qwen3.5 pattern)
+        std::vector<int> attention_layer_indices;  // Explicit list, or empty for auto-detect
+        int hybrid_stride;              // For auto-detect: attention every N layers (Qwen3.5: 4)
+
+        // TriAttention calibration file (one-time offline stats)
+        std::string triattn_stats_path; // Path to precomputed stats file
+
+        // Internal use
+        float tri_score_threshold;      // Score cutoff for gated recompute (default: 0.3)
+    };
+
+    // Set KV-Direct + TriAttention parameters
+    LLAMA_API void llama_kv_cache_set_direct_tri_params(
+        struct llama_context * ctx,
+        const struct llama_kv_direct_tri_params * params);
 
 #ifdef __cplusplus
 }

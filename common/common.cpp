@@ -1630,12 +1630,51 @@ bool gpt_params_find_arg(int argc, char ** argv, const std::string & arg, gpt_pa
         params.merge_up_gate_exps = true;
         return true;
     }
-    if (arg == "-khad" || arg == "--k-cache-hadamard") {
+if (arg == "-khad" || arg == "--k-cache-hadamard") {
         params.k_cache_hadamard = true;
         return true;
     }
     if (arg == "-vhad" || arg == "--v-cache-hadamard") {
         params.v_cache_hadamard = true;
+        return true;
+    }
+    // KV-Direct + TriAttention
+    if (arg == "--kv-direct-tri-enable") {
+        params.kv_direct_tri_enable = true;
+        return true;
+    }
+    if (arg == "--kv-direct-tri-window") {
+        CHECK_ARG
+        params.kv_direct_tri_window = std::stoi(argv[i]);
+        return true;
+    }
+    if (arg == "--kv-direct-tri-budget") {
+        CHECK_ARG
+        params.kv_direct_tri_budget = std::stoi(argv[i]);
+        return true;
+    }
+    if (arg == "--kv-direct-tri-alpha") {
+        CHECK_ARG
+        params.kv_direct_tri_alpha = std::stof(argv[i]);
+        return true;
+    }
+    if (arg == "--kv-direct-tri-prune-interval") {
+        CHECK_ARG
+        params.kv_direct_tri_prune_interval = std::stoi(argv[i]);
+        return true;
+    }
+    if (arg == "--kv-direct-tri-protect-prefill") {
+        params.kv_direct_tri_protect_prefill = true;
+        return true;
+    }
+    if (arg == "--kv-direct-tri-hybrid-stride") {
+        CHECK_ARG
+        params.kv_direct_tri_hybrid_stride = std::stoi(argv[i]);
+        return true;
+    }
+    if (arg == "--kv-direct-tri-stats") {
+        CHECK_ARG
+        params.kv_direct_tri_stats_path = argv[i];
         return true;
     }
     if (arg == "-smgs" || arg == "--split-mode-graph-scheduling") {
@@ -2431,6 +2470,16 @@ void gpt_params_print_usage(int /*argc*/, char ** argv, const gpt_params & param
     options.push_back({ "*",         "-muge,  --merge-up-gate-experts,","merge ffn_up/gate_exps (default: %d)", params.merge_up_gate_exps});
     options.push_back({ "*",         "-khad,  --k-cache-hadamard,",     "Use Hadamard transform for K-cache (default: %d)", params.k_cache_hadamard});
     options.push_back({ "*",         "-vhad,  --v-cache-hadamard,",     "Use Hadamard transform for V-cache (default: %d)", params.v_cache_hadamard});
+
+    // KV-Direct + TriAttention
+    options.push_back({ "*",         "--kv-direct-tri-enable,",          "Enable KV-Direct + TriAttention (default: %d)", params.kv_direct_tri_enable});
+    options.push_back({ "*",         "--kv-direct-tri-window N,",        "KV-Direct recompute window (default: %d)", params.kv_direct_tri_window});
+    options.push_back({ "*",         "--kv-direct-tri-budget N,",        "TriAttention residual budget (default: %d)", params.kv_direct_tri_budget});
+    options.push_back({ "*",         "--kv-direct-tri-alpha F,",         "TriAttention alpha weight (default: %.1f)", params.kv_direct_tri_alpha});
+    options.push_back({ "*",         "--kv-direct-tri-prune-interval N,", "TriAttention prune interval (default: %d)", params.kv_direct_tri_prune_interval});
+    options.push_back({ "*",         "--kv-direct-tri-protect-prefill,",  "Protect prefill residuals from pruning (default: %d)", params.kv_direct_tri_protect_prefill});
+    options.push_back({ "*",         "--kv-direct-tri-hybrid-stride N,", "Hybrid attention stride (default: %d)", params.kv_direct_tri_hybrid_stride});
+    options.push_back({ "*",         "--kv-direct-tri-stats PATH,",      "Path to TriAttention stats file (default: none)"});
     options.push_back({ "*",         "-smf16, --split-mode-f16,",       "Use f16 for data exchange between GPUs (default: %d)", true});
     options.push_back({ "*",         "-smf32, --split-mode-f32,",       "Use f32 for data exchange between GPUs (default: %d)", false});
     options.push_back({ "*",         "-grt, --graph-reduce-type",       "Type for data exchange between GPUs (default: %s)", "f32"});
@@ -3291,6 +3340,23 @@ struct llama_init_result llama_init_from_gpt_params(gpt_params & params) {
     auto cparams = common_context_params_to_llama(params);
 
     llama_context * lctx = llama_init_from_model(model, cparams);
+
+// KV-Direct + TriAttention
+if (params.kv_direct_tri_enable) {
+    llama_kv_direct_tri_params tri_params = {};
+    tri_params.enable = true;
+    tri_params.recompute_window = params.kv_direct_tri_window;
+    tri_params.triattn_budget = params.kv_direct_tri_budget;
+    tri_params.triattn_alpha = params.kv_direct_tri_alpha;
+    tri_params.prune_interval = params.kv_direct_tri_prune_interval;
+    tri_params.protect_prefill = params.kv_direct_tri_protect_prefill;
+    tri_params.residual_dtype = GGML_TYPE_F16;
+    tri_params.hybrid_stride = params.kv_direct_tri_hybrid_stride;
+    if (!params.kv_direct_tri_stats_path.empty()) {
+        tri_params.triattn_stats_path = params.kv_direct_tri_stats_path;
+    }
+    llama_kv_cache_set_direct_tri_params(lctx, &tri_params);
+}
     if (lctx == NULL) {
         fprintf(stderr, "%s: error: failed to create context with model '%s'\n", __func__, params.model.c_str());
         llama_free_model(model);
