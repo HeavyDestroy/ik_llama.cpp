@@ -13,10 +13,13 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <vector>
-#include <string>
 #include <stdio.h>
 #include <stdbool.h>
+
+#ifdef __cplusplus
+#include <vector>
+#include <string>
+#endif
 
 #ifdef LLAMA_SHARED
 #    if defined(_WIN32) && !defined(__MINGW32__)
@@ -1541,6 +1544,7 @@ LLAMA_API struct llama_grammar* llama_sampler_init_grammar_lazy_patterns(
     //
     // KV-Direct + TriAttention
     //
+#ifdef __cplusplus
 
     struct llama_kv_direct_tri_params {
         bool enable;                    // Enable residual checkpointing + TriAttention
@@ -1566,6 +1570,8 @@ LLAMA_API struct llama_grammar* llama_sampler_init_grammar_lazy_patterns(
     LLAMA_API void llama_kv_cache_set_direct_tri_params(
         struct llama_context * ctx,
         const struct llama_kv_direct_tri_params * params);
+
+#endif // __cplusplus
 
 #ifdef __cplusplus
 }
