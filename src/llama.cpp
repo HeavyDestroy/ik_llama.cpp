@@ -4188,10 +4188,18 @@ if (kv_self.enable_triattention && !kv_self.recurrent && !kv_self.residual_graph
 
         for (int i = 0; i < n_tok; ++i) {
             const llama_pos pos = u_batch.pos[i];
-            const uint32_t cell_idx = kv_self.head - n_tokens + i;
+            // Find the actual cell index from the position (handles defragmentation)
+            uint32_t cell_idx = pos;
+            if (cell_idx >= kv_self.size) {
+                // Ring buffer wrap-around
+                cell_idx = cell_idx % kv_self.size;
+            }
             if (cell_idx >= kv_self.cells.size()) continue;
 
             auto & cell = kv_self.cells[cell_idx];
+            
+            // Safety check: verify this cell actually belongs to our sequence
+            if (cell.is_empty()) continue;
             
             // Map to pre-allocated residual buffer
             void * dst = kv_self.residual_buffer.data() + 
@@ -4773,7 +4781,34 @@ static void llama_kv_cache_defrag_internal(struct llama_context & lctx) {
     ggml_cgraph * gf = llm_build_context::llama_build_graph_defrag(lctx, ids);
 
     llama_graph_compute(lctx, gf, lctx.cparams.n_threads);
+
+    // Reorganize residual buffer to match defragmented cell positions
+#ifdef LLAMA_KV_DIRECT_TRIATTN
+    if (kv_self.enable_triattention && n_moves > 0) {
+        // ids[i] = destination index for cell that was at index i
+        // We need to move residual_buffer[i] to residual_buffer[ids[i]]
+        std::vector<uint8_t> temp_residual(kv_self.residual_buffer.size());
+        std::vector<bool> temp_retained(kv_self.residual_retained.size());
+        
+        for (uint32_t i = 0; i < kv_self.size; ++i) {
+            uint32_t dest = ids[i];
+            if (dest < kv_self.size && kv_self.cells[i].has_residual) {
+                // Move residual data
+                memcpy(temp_residual.data() + dest * kv_self.residual_stride,
+                       kv_self.residual_buffer.data() + i * kv_self.residual_stride,
+                       kv_self.residual_stride);
+                temp_retained[dest] = kv_self.residual_retained[i];
+                // Update cell's residual pointer to new location
+                kv_self.cells[dest].residual_ptr = 
+                    temp_residual.data() + dest * kv_self.residual_stride;
+            }
+        }
+        
+        kv_self.residual_buffer = std::move(temp_residual);
+        kv_self.residual_retained = std::move(temp_retained);
+    }
 #endif
+#endif // #if 0
 
     //const int64_t t_end = ggml_time_us();
 
