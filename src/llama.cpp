@@ -4784,6 +4784,7 @@ static void llama_kv_cache_defrag_internal(struct llama_context & lctx) {
 
     // Reorganize residual buffer to match defragmented cell positions
 #ifdef LLAMA_KV_DIRECT_TRIATTN
+    // Reorganize residual buffer to match defragmented cell positions
     if (kv_self.enable_triattention && n_moves > 0) {
         // ids[i] = destination index for cell that was at index i
         // We need to move residual_buffer[i] to residual_buffer[ids[i]]
@@ -4798,10 +4799,14 @@ static void llama_kv_cache_defrag_internal(struct llama_context & lctx) {
                        kv_self.residual_buffer.data() + i * kv_self.residual_stride,
                        kv_self.residual_stride);
                 temp_retained[dest] = kv_self.residual_retained[i];
-                // Update cell's residual pointer to new location
+                // Update destination cell's residual pointer
                 kv_self.cells[dest].residual_ptr = 
                     temp_residual.data() + dest * kv_self.residual_stride;
+                kv_self.cells[dest].has_residual = true;
             }
+            // Clear source cell's residual (data has been moved)
+            kv_self.cells[i].has_residual = false;
+            kv_self.cells[i].residual_ptr = nullptr;
         }
         
         kv_self.residual_buffer = std::move(temp_residual);
@@ -4949,7 +4954,7 @@ static void llama_kv_direct_sync_evicted_kv(
     };
     struct ggml_context * ctx_scratch = ggml_init(params);
 
-    for (uint32_t i = kv.recompute_window; i < kv.head; ++i) {
+    for (uint32_t i = kv.recompute_window; i < kv.size; ++i) {
         uint32_t cell_idx = i;
         if (cell_idx >= kv.cells.size()) continue;
 
@@ -4969,6 +4974,7 @@ static void llama_kv_direct_sync_evicted_kv(
         if (hparams.rope_type != LLAMA_ROPE_TYPE_NONE) {
             ggml_tensor * pos = ggml_new_tensor_1d(ctx_scratch, GGML_TYPE_I32, 1);
             int32_t p = cell.absolute_pos;
+            if (p < 0) continue;  // Safety: skip if position not set
             ggml_backend_tensor_set(pos, &p, 0, sizeof(int32_t));
 
             k_re = ggml_rope_ext(

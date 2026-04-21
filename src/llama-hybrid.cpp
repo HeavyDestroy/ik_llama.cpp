@@ -32,8 +32,16 @@ void llama_kv_cache_mark_layer_types(
         uint32_t cell_idx = start_idx + i;
         if (cell_idx >= kv->cells.size()) break;
 
+        // Safety: ensure layer_idx is valid before using it
+        int layer = kv->cells[cell_idx].layer_idx;
+        if (layer < 0 || layer >= model.hparams.n_layer) {
+            // Fallback: assume attention layer for safety
+            kv->cells[cell_idx].is_attention_layer = true;
+            continue;
+        }
+
         // Auto-detect based on hybrid pattern
-        bool is_attn = llama_layer_uses_attention(model, kv->cells[cell_idx].layer_idx);
+        bool is_attn = llama_layer_uses_attention(model, layer);
         kv->cells[cell_idx].is_attention_layer = is_attn;
     }
 #endif
@@ -55,28 +63,39 @@ void compact_residual_buffer(llama_kv_cache * kv) {
 #ifdef LLAMA_KV_DIRECT_TRIATTN
     if (!kv->enable_triattention) return;
 
-    uint32_t write_idx = 0;
-    for (uint32_t read_idx = 0; read_idx < kv->cells.size(); ++read_idx) {
-        if (kv->residual_retained[read_idx] && kv->cells[read_idx].has_residual) {
-            if (write_idx != read_idx) {
-                // Move residual data
-                void * src = kv->cells[read_idx].residual_ptr;
-                void * dst = kv->residual_buffer.data() + write_idx * kv->residual_stride;
-                memcpy(dst, src, kv->residual_stride);
-
-                // Update cell metadata
-                kv->cells[write_idx].residual_ptr = dst;
-                kv->cells[write_idx].has_residual = true;
-                kv->cells[write_idx].tri_score = kv->cells[read_idx].tri_score;
-                kv->cells[write_idx].absolute_pos = kv->cells[read_idx].absolute_pos;
-                kv->cells[write_idx].layer_idx = kv->cells[read_idx].layer_idx;
-                kv->cells[write_idx].is_attention_layer = kv->cells[read_idx].is_attention_layer;
-            }
-            ++write_idx;
-        } else {
-            kv->cells[read_idx].has_residual = false;  // Mark evicted
+    // First pass: collect retained residuals into temp storage
+    std::vector<void *> retained_ptrs;
+    std::vector<uint32_t> retained_indices;
+    
+    for (uint32_t i = 0; i < kv->cells.size(); ++i) {
+        if (kv->residual_retained[i] && kv->cells[i].has_residual) {
+            retained_ptrs.push_back(kv->cells[i].residual_ptr);
+            retained_indices.push_back(i);
         }
     }
-    LLAMA_LOG_DEBUG("Compacted residual buffer: %zu cells retained\n", write_idx);
+    
+    // Second pass: move data to compact positions and update ALL cells
+    for (uint32_t i = 0; i < kv->cells.size(); ++i) {
+        // Clear residual from every cell first
+        kv->cells[i].has_residual = false;
+        kv->cells[i].residual_ptr = nullptr;
+    }
+    
+    // Write compacted residuals
+    for (size_t i = 0; i < retained_ptrs.size(); ++i) {
+        uint32_t compact_idx = static_cast<uint32_t>(i);
+        void * src = retained_ptrs[i];
+        uint32_t orig_idx = retained_indices[i];
+        
+        void * dst = kv->residual_buffer.data() + compact_idx * kv->residual_stride;
+        memcpy(dst, src, kv->residual_stride);
+        
+        // Update the ORIGINAL cell (not the compact index)
+        kv->cells[orig_idx].residual_ptr = dst;
+        kv->cells[orig_idx].has_residual = true;
+        // tri_score, absolute_pos, layer_idx, is_attention_layer already correct
+    }
+    
+    LLAMA_LOG_DEBUG("Compacted residual buffer: %zu cells retained\n", retained_ptrs.size());
 #endif
 }
