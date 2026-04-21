@@ -75,7 +75,158 @@ That's all! Open [http://127.0.0.1:8080](http://127.0.0.1:8080) in Browser start
 
 ### [Common parameters and options](./docs/parameters.md)
 
-## Latest News
+## KV-Direct + TriAttention: Bounded-Memory Long-Context Inference
+
+**Branch:** [`kv-direct-triattention`](https://github.com/HeavyDestroy/ik_llama.cpp/tree/kv-direct-triattention)
+
+KV-Direct + TriAttention enables running large models at extreme context lengths (256K+) on limited RAM by replacing the standard O(n) KV cache with a bounded residual buffer and on-demand K/V recompute.
+
+### What It Does
+
+Standard KV caches grow linearly with context length — a 27B model at 256K context needs ~32GB just for the KV cache. KV-Direct + TriAttention:
+
+1. **Captures layer residuals** during the forward pass (pre-attention, post-normalization)
+2. **Stores them in a fixed-size CPU buffer** (F16, ~2GB for 256K context)
+3. **Recomputes K/V on demand** from residuals for evicted tokens (zero-error)
+4. **Gates recompute via TriAttention scoring** — only high-importance tokens are kept
+5. **Skips Mamba/GDN layers** in hybrid models (Qwen3.5) — they don't use KV attention
+
+### Memory Savings
+
+| Context | Standard KV (F16) | KV-Direct + Tri | Savings |
+|---------|------------------|-----------------|---------|
+| 64K | 8 GB | 0.5 GB | **7.5 GB (93.75%)** |
+| 128K | 16 GB | 1 GB | **15 GB (93.75%)** |
+| 256K | 32 GB | 2 GB | **30 GB (93.75%)** |
+
+### Build
+
+```bash
+cmake -B build -DLLAMA_KV_DIRECT_TRIATTN=ON -DGGML_NATIVE=ON
+
+cmake --build build --config Release -j$(nproc)
+```
+
+### Usage
+
+**Quick start (CLI):**
+
+```bash
+./build/bin/llama-cli \
+  -m model.gguf \
+  -p "Your prompt" \
+  -n 256 \
+  --kv-direct-tri-enable \
+  --kv-direct-tri-window 65536 \
+  --kv-direct-tri-budget 131072 \
+  --kv-direct-tri-alpha 0.7 \
+  --kv-direct-tri-prune-interval 256 \
+  --kv-direct-tri-stats ./tri_stats.bin \
+  --kv-direct-tri-hybrid-stride 4 \
+  --kv-direct-tri-protect-prefill
+```
+
+**Production server (256K context, 27B model, ~24GB RAM):**
+
+```bash
+./build/bin/llama-server \
+  -m Condor-Carnice-27B-IQ6_K.gguf \
+  -c 262144 \
+  -b 2048 \
+  -ub 1024 \
+  -t 56 \
+  -ctk q8_0 \
+  -ctv q8_0 \
+  --flash-attn \
+  --kv-direct-tri-enable \
+  --kv-direct-tri-window 65536 \
+  --kv-direct-tri-budget 131072 \
+  --kv-direct-tri-alpha 0.7 \
+  --kv-direct-tri-prune-interval 256 \
+  --kv-direct-tri-stats ./tri_stats_condor_carnice_27b.bin \
+  --kv-direct-tri-hybrid-stride 4 \
+  --kv-direct-tri-protect-prefill \
+  -ngl 0 \
+  --host 0.0.0.0 \
+  --port 8080
+```
+
+### Key Parameters
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--kv-direct-tri-enable` | off | Enable KV-Direct + TriAttention |
+| `--kv-direct-tri-window N` | 2048 | Tokens kept in fast KV cache (recent tokens, no recompute) |
+| `--kv-direct-tri-budget N` | 8192 | Max residuals retained by TriAttention score |
+| `--kv-direct-tri-alpha F` | 0.7 | TriAttention weight: trig-series (0.0-1.0) |
+| `--kv-direct-tri-prune-interval N` | 128 | Run pruning every N new tokens |
+| `--kv-direct-tri-hybrid-stride N` | 4 | Attention layer stride (Qwen3.5: every 4th) |
+| `--kv-direct-tri-protect-prefill` | off | Never evict initial prompt residuals |
+| `--kv-direct-tri-stats PATH` | none | Path to TriAttention calibration stats file |
+
+### Generating TriAttention Stats
+
+**Quick start (default stats, no ML dependencies):**
+
+```bash
+python3 generate_default_stats.py model.gguf tri_stats.bin
+```
+
+**Full calibration (requires transformers + torch):**
+
+```bash
+python3 calibrate_triattention.py model.gguf tri_stats.bin
+```
+
+Stats files are small (~3-4KB) and contain per-layer attention distribution statistics used for TriAttention scoring. Default stats work well for most models; calibrated stats optimize scoring for your specific model.
+
+### How It Works
+
+```
+Forward Pass (Prefill):
+  ┌─────────────┐     ┌──────────────┐     ┌─────────────┐
+  │ Layer Norm  │ ──► │ Residual ────┼───► │ KV Project  │
+  └─────────────┘     │ (captured)   │     └─────────────┘
+                      └──────┬───────┘
+                             │ ggml_cpy
+                      ┌──────▼───────┐
+                      │ CPU Buffer   │ ◄── F16, fixed size
+                      │ (residuals)  │
+                      └──────────────┘
+
+Decode (Evicted Token):
+  ┌─────────────┐     ┌──────────────┐     ┌─────────────┐
+  │ CPU Buffer  │ ──► │ RMSNorm +    │ ──► │ RoPE +      │
+  │ (residual)  │     │ Linear Proj  │     │ KV Cache    │
+  └─────────────┘     └──────────────┘     └─────────────┘
+```
+
+TriAttention scoring runs after each prefill batch, assigning importance scores to residuals. During pruning, only top-scoring residuals are retained within the budget.
+
+### Performance
+
+- **~15% overhead** on short contexts (residual capture + scoring)
+- **Break-even at ~32K tokens** (savings offset overhead)
+- **2-4x cheaper** at 256K context vs. standard KV cache
+- **Zero perplexity loss** when `--kv-direct-tri-protect-prefill` is enabled
+
+### Requirements
+
+- Qwen3.5 hybrid models (tested on 0.8B, 27B)
+- CPU RAM: model weights + residual buffer (~2GB at 256K)
+- `--flash-attn` required for quantized KV cache (`-ctk q8_0`)
+
+### Troubleshooting
+
+**"Failed to open TriAttention stats"**: Stats file path is relative to working directory. Use absolute path.
+
+**High memory usage**: Increase `--kv-direct-tri-window` to keep more tokens in fast KV cache, or reduce `--kv-direct-tri-budget`.
+
+**Slow generation**: The residual capture adds ~15% overhead. At long contexts, the memory savings more than compensate.
+
+---
+
+### [Step by step guide](./docker/README.md) for ik_llama.cpp in podman/docker container including llama-swap
 
 
 ### Model Support
@@ -131,6 +282,7 @@ Implemented for Zen4, AVX2, ARM_NEON, Metal, CUDA [PR 682](https://github.com/ik
 
 ### Features
 
+* KV-Direct + TriAttention for bounded-memory long-context inference [branch](https://github.com/HeavyDestroy/ik_llama.cpp/tree/kv-direct-triattention)
 * New split mode "graph" for multi GPU setups [PR 1022](https://github.com/ikawrakow/ik_llama.cpp/pull/1022)
 * Fused delta-net for Qwen3-Next and Qwen3.5-MoE [PR 1315](https://github.com/ikawrakow/ik_llama.cpp/pull/1315) [PR 1333](https://github.com/ikawrakow/ik_llama.cpp/pull/1333) [PR 1362](https://github.com/ikawrakow/ik_llama.cpp/pull/1362) [PR 1373](https://github.com/ikawrakow/ik_llama.cpp/pull/1373)
 * Hadamard transforms for K-cache and V-cache [PR 1033](https://github.com/ikawrakow/ik_llama.cpp/pull/1033) [PR 1034](https://github.com/ikawrakow/ik_llama.cpp/pull/1034) [PR 1527](https://github.com/ikawrakow/ik_llama.cpp/pull/1527)
