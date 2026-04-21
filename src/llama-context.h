@@ -123,6 +123,8 @@ struct llama_kv_cache {
 
     // Temporary graph tensors holding CPU-synced residuals (cleared each decode)
     std::vector<ggml_tensor *> residual_graph_tensors;
+    // Persistent context for residual tensors (survives across graph computes)
+    ggml_context * residual_ctx = nullptr;
 #endif
 
     size_t total_size() const {
@@ -137,6 +139,11 @@ struct llama_kv_cache {
         for (struct ggml_context * ctx : ctxs) {
             ggml_free(ctx);
         }
+#ifdef LLAMA_KV_DIRECT_TRIATTN
+        if (residual_ctx) {
+            ggml_free(residual_ctx);
+        }
+#endif
         for (ggml_backend_buffer_t buf : bufs) {
             ggml_backend_buffer_free(buf);
         }

@@ -100,12 +100,14 @@ ggml_cgraph * llm_build_context::build_qwen35() {
 if (lctx.kv_self.enable_triattention && !lctx.kv_self.recurrent) {
     if (llama_layer_uses_attention(model, il)) {
         // cur is [n_embd, n_tokens] — residual after attention, before FFN
-        // Create CPU-backed tensor for async GPU→CPU copy
-        // Use cur's actual shape to avoid size mismatches
+        // Use PERSISTENT residual_ctx instead of ephemeral ctx0 to prevent use-after-free
+        ggml_context * res_ctx = lctx.kv_self.residual_ctx;
+        if (!res_ctx) continue;
+
         ggml_tensor * residual_cpu = ggml_new_tensor_2d(
-            ctx0, GGML_TYPE_F32, cur->ne[0], cur->ne[1]);
+            res_ctx, GGML_TYPE_F32, cur->ne[0], cur->ne[1]);
         ggml_format_name(residual_cpu, "kv_direct_res_il%d", il);
-        // Force CPU backend via scheduler
+        // Force CPU backend
         ggml_backend_sched_set_tensor_backend(lctx.sched, residual_cpu, lctx.backend_cpu);
 
         ggml_cpy(ctx0, cur, residual_cpu);

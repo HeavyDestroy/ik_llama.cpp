@@ -1076,6 +1076,24 @@ static bool llama_kv_cache_init(
     }
 #endif
 
+#ifdef LLAMA_KV_DIRECT_TRIATTN
+    // Initialize persistent context for residual tensors
+    // This context survives across graph computes to prevent use-after-free
+    if (cache.enable_triattention) {
+        size_t residual_ctx_size = ggml_tensor_overhead() * (n_layer + 16);
+        struct ggml_init_params res_params = {
+            .mem_size   = residual_ctx_size,
+            .mem_buffer = nullptr,
+            .no_alloc   = true,
+        };
+        cache.residual_ctx = ggml_init(res_params);
+        if (!cache.residual_ctx) {
+            LLAMA_LOG_ERROR("%s: failed to allocate residual context\n", __func__);
+            return false;
+        }
+    }
+#endif
+
     return true;
 }
 
