@@ -1560,7 +1560,10 @@ LLAMA_API struct llama_grammar* llama_sampler_init_grammar_lazy_patterns(
         int hybrid_stride;              // For auto-detect: attention every N layers (Qwen3.5: 4)
 
         // TriAttention calibration file (one-time offline stats)
-        std::string triattn_stats_path; // Path to precomputed stats file
+        std::string triattn_stats_path;       // Path to precomputed stats file
+        std::string triattn_calibrate_save;   // Path to save auto-calibrated stats (default: none)
+        bool triattn_calibrate_warmup;        // Run warmup prompts for best calibration (default: false)
+        std::vector<std::string> triattn_warmup_prompts;  // Custom warmup prompts (optional)
 
         // Internal use
         float tri_score_threshold;      // Score cutoff for gated recompute (default: 0.3)
@@ -1570,6 +1573,11 @@ LLAMA_API struct llama_grammar* llama_sampler_init_grammar_lazy_patterns(
     LLAMA_API void llama_kv_cache_set_direct_tri_params(
         struct llama_context * ctx,
         const struct llama_kv_direct_tri_params * params);
+
+// Warmup calibration helpers
+    LLAMA_API bool llama_kv_cache_needs_warmup(struct llama_context * ctx);
+    LLAMA_API void llama_kv_cache_mark_warmup_complete(struct llama_context * ctx);
+    LLAMA_API void llama_kv_cache_finalize_warmup_calibration(struct llama_context * ctx);
 
 #endif // __cplusplus
 

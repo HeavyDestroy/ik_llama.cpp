@@ -4216,8 +4216,20 @@ if (kv_self.enable_triattention && !kv_self.recurrent && !kv_self.residual_graph
 
             auto & cell = kv_self.cells[cell_idx];
             
-            // Safety check: verify this cell actually belongs to our sequence
+            // Safety check: verify this cell is not empty
             if (cell.is_empty()) continue;
+            
+            // Verify sequence ownership: only process cells belonging to
+            // our current batch sequences (prevents cross-sequence contamination
+            // when multiple sequences share the same ring buffer position)
+            bool seq_match = false;
+            for (int32_t s = 0; s < u_batch.n_seq_id[i]; ++s) {
+                if (cell.has_seq_id(u_batch.seq_id[i][s])) {
+                    seq_match = true;
+                    break;
+                }
+            }
+            if (!seq_match) continue;
             
             // Map to pre-allocated residual buffer
             void * dst = kv_self.residual_buffer.data() + 
@@ -4237,19 +4249,22 @@ if (kv_self.enable_triattention && !kv_self.recurrent && !kv_self.residual_graph
             cell.absolute_pos = pos;
             cell.layer_idx = il;
 
-            // Compute TriAttention score if stats available
+            // Compute TriAttention score BEFORE F16 quantization to avoid
+            // precision loss on small residual values (F16 has ~4x coarser
+            // granularity below 1e-4, causing score jitter near thresholds)
             if (!kv_self.layer_stats.empty()) {
                 auto it = kv_self.layer_stats.find(il);
                 if (it != kv_self.layer_stats.end() && it->second.is_attention) {
-                    float res_f32[8192]; // Max n_embd safety buffer
-                    if (kv_self.residual_dtype == GGML_TYPE_F16) {
-                        ggml_fp16_to_fp32_row((const ggml_fp16_t *)dst, res_f32, n_embd);
-                    } else {
-                        memcpy(res_f32, dst, n_embd * sizeof(float));
-                    }
                     cell.tri_score = compute_triattention_score(
-                        it->second, res_f32, n_embd, kv_self.triattn_alpha);
+                        it->second, res_data + i * n_embd, n_embd, kv_self.triattn_alpha);
                 }
+            }
+
+            // Copy F32 → target dtype (F16/F32)
+            if (kv_self.residual_dtype == GGML_TYPE_F16) {
+                ggml_fp32_to_fp16_row(res_data + i * n_embd, (ggml_fp16_t *)dst, n_embd);
+            } else {
+                memcpy(dst, res_data + i * n_embd, n_embd * sizeof(float));
             }
         }
     }
@@ -6277,14 +6292,14 @@ static bool llama_load_triattention_stats(
         stats.k_norm_mean.resize(stats.n_freq_bands);
         stats.mrl.resize(stats.n_freq_bands);
 
-        fread(stats.q_center_norm.data(), sizeof(float), stats.n_freq_bands, f);
-        fread(stats.k_center_norm.data(), sizeof(float), stats.n_freq_bands, f);
-        fread(stats.q_center_phase.data(), sizeof(float), stats.n_freq_bands, f);
-        fread(stats.k_center_phase.data(), sizeof(float), stats.n_freq_bands, f);
-        fread(stats.q_norm_mean.data(), sizeof(float), stats.n_freq_bands, f);
-        fread(stats.k_norm_mean.data(), sizeof(float), stats.n_freq_bands, f);
-        fread(stats.mrl.data(), sizeof(float), stats.n_freq_bands, f);
-        fread(&stats.is_attention, sizeof(bool), 1, f);
+        if (fread(stats.q_center_norm.data(), sizeof(float), stats.n_freq_bands, f) != (size_t)stats.n_freq_bands) { fclose(f); return false; }
+        if (fread(stats.k_center_norm.data(), sizeof(float), stats.n_freq_bands, f) != (size_t)stats.n_freq_bands) { fclose(f); return false; }
+        if (fread(stats.q_center_phase.data(), sizeof(float), stats.n_freq_bands, f) != (size_t)stats.n_freq_bands) { fclose(f); return false; }
+        if (fread(stats.k_center_phase.data(), sizeof(float), stats.n_freq_bands, f) != (size_t)stats.n_freq_bands) { fclose(f); return false; }
+        if (fread(stats.q_norm_mean.data(), sizeof(float), stats.n_freq_bands, f) != (size_t)stats.n_freq_bands) { fclose(f); return false; }
+        if (fread(stats.k_norm_mean.data(), sizeof(float), stats.n_freq_bands, f) != (size_t)stats.n_freq_bands) { fclose(f); return false; }
+        if (fread(stats.mrl.data(), sizeof(float), stats.n_freq_bands, f) != (size_t)stats.n_freq_bands) { fclose(f); return false; }
+        if (fread(&stats.is_attention, sizeof(bool), 1, f) != 1) { fclose(f); return false; }
 
         kv->layer_stats[layer_idx] = stats;
     }
@@ -6318,9 +6333,47 @@ void llama_kv_cache_set_direct_tri_params(
 
     // Load TriAttention stats only if path is provided and non-empty
     if (!params->triattn_stats_path.empty()) {
-        llama_load_triattention_stats(&kv, params->triattn_stats_path);
+        if (!llama_load_triattention_stats(&kv, params->triattn_stats_path)) {
+            LLAMA_LOG_WARN("Failed to load stats from %s; falling back to online calibration\n",
+                          params->triattn_stats_path.c_str());
+            kv.need_warmup_calibration = params->triattn_calibrate_warmup;
+            kv.warmup_output_path = params->triattn_calibrate_save;
+            
+            // If warmup is not scheduled, disable TriAttention
+            if (!params->triattn_calibrate_warmup) {
+                LLAMA_LOG_WARN("Stats load failed and no warmup; disabling TriAttention\n");
+                kv.enable_triattention = false;
+                return;
+            }
+        }
     } else {
-        LLAMA_LOG_INFO("No TriAttention stats file provided; using online calibration fallback\n");
+        // Check if calibration save file already exists (skip warmup if it does)
+        std::string check_path = params->triattn_calibrate_save;
+        if (params->triattn_calibrate_warmup && !check_path.empty()) {
+            FILE * f = fopen(check_path.c_str(), "rb");
+            if (f) {
+                // File exists and is readable - try to load it instead of recalibrating
+                fclose(f);
+                LLAMA_LOG_INFO("Calibration file exists: %s - loading instead of recalibrating\n",
+                              check_path.c_str());
+                if (llama_load_triattention_stats(&kv, check_path)) {
+                    LLAMA_LOG_INFO("Loaded existing calibration from: %s\n", check_path.c_str());
+                    return;  // Skip warmup, use existing calibration
+                }
+            }
+        }
+        
+        LLAMA_LOG_INFO("No TriAttention stats file provided; running online calibration\n");
+        kv.need_warmup_calibration = params->triattn_calibrate_warmup;
+        kv.warmup_output_path = params->triattn_calibrate_save;
+        
+        // If no warmup is scheduled, disable TriAttention to avoid using
+        // uninitialized stats (prevents CUDA illegal memory access)
+        if (!params->triattn_calibrate_warmup) {
+            LLAMA_LOG_WARN("No stats file and no warmup scheduled; disabling TriAttention\n");
+            kv.enable_triattention = false;
+            return;
+        }
     }
 
     // Allocate residual buffer
@@ -6340,6 +6393,42 @@ void llama_kv_cache_set_direct_tri_params(
                   kv.residual_buffer.size() / 1e9, kv.triattn_budget);
 }
 #endif
+
+// Check if warmup calibration is needed
+bool llama_kv_cache_needs_warmup(struct llama_context * ctx) {
+#ifdef LLAMA_KV_DIRECT_TRIATTN
+    return ctx && ctx->kv_self.need_warmup_calibration;
+#else
+    return false;
+#endif
+}
+
+// Mark a warmup prompt as complete
+void llama_kv_cache_mark_warmup_complete(struct llama_context * ctx) {
+#ifdef LLAMA_KV_DIRECT_TRIATTN
+    if (ctx) {
+        ctx->kv_self.warmup_prompts_completed++;
+    }
+#endif
+}
+
+// Finalize warmup calibration - compute stats from collected residuals and save
+void llama_kv_cache_finalize_warmup_calibration(struct llama_context * ctx) {
+#ifdef LLAMA_KV_DIRECT_TRIATTN
+    if (!ctx) return;
+    auto & kv = ctx->kv_self;
+    
+    if (!kv.need_warmup_calibration) return;
+    
+    LLAMA_LOG_INFO("Finalizing TriAttention calibration: %d warmup prompts completed\n",
+                  kv.warmup_prompts_completed);
+    
+    // Compute stats from collected residuals
+    llama_triattention_calibrate_online(&kv, &ctx->model, kv.warmup_output_path, true, {});
+    
+    kv.need_warmup_calibration = false;
+#endif
+}
 
 void llama_free(struct llama_context * ctx) {
     delete ctx;

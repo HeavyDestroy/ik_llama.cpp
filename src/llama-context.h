@@ -117,6 +117,12 @@ struct llama_kv_cache {
     };
     std::unordered_map<int, TriAttentionLayerStats> layer_stats;
 
+    // Warmup calibration state
+    bool need_warmup_calibration = false;
+    std::string warmup_output_path;
+    int warmup_prompts_completed = 0;
+    int warmup_prompts_total = 0;
+
     // Pruning bookkeeping
     std::vector<bool> residual_retained;  // Which residuals to keep after prune
     float tri_score_threshold;            // Score cutoff for gated recompute
@@ -154,6 +160,15 @@ struct llama_kv_cache {
 #ifdef LLAMA_KV_DIRECT_TRIATTN
 float residual_norm_in_band(const float * residual, int band_idx, int n_embd, int n_bands);
 void compact_residual_buffer(struct llama_kv_cache * kv);
+bool llama_triattention_calibrate_online(
+    llama_kv_cache * kv,
+    const llama_model * model,
+    const std::string & output_path,
+    bool do_warmup,
+    const std::vector<std::string> & warmup_prompts);
+bool llama_kv_cache_needs_warmup(struct llama_context * ctx);
+void llama_kv_cache_mark_warmup_complete(struct llama_context * ctx);
+void llama_kv_cache_finalize_warmup_calibration(struct llama_context * ctx);
 #endif
 
 struct llama_control_vector {

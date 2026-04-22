@@ -386,14 +386,22 @@ struct gpt_params {
     bool has_mtp           = false; // enable MTP if supported by the model
 
     // KV-Direct + TriAttention
-    bool kv_direct_tri_enable       = false;
-    uint32_t kv_direct_tri_window   = 2048;
-    uint32_t kv_direct_tri_budget   = 8192;
-    float    kv_direct_tri_alpha    = 0.7f;
-    uint32_t kv_direct_tri_prune_interval = 128;
-    bool     kv_direct_tri_protect_prefill = true;
-    int      kv_direct_tri_hybrid_stride = 4;
-    std::string kv_direct_tri_stats_path = "";
+bool kv_direct_tri_enable       = false;
+    int  kv_direct_tri_window      = 2048;
+    int  kv_direct_tri_budget      = 8192;
+    float kv_direct_tri_alpha      = 0.7f;
+    int  kv_direct_tri_prune_interval = 128;
+    bool kv_direct_tri_protect_prefill = true;
+    int  kv_direct_tri_hybrid_stride = 4;
+    std::string kv_direct_tri_stats_path;
+    std::string kv_direct_tri_calibrate_save;
+    bool kv_direct_tri_calibrate_only = false;
+    bool kv_direct_tri_calibrate_warmup = false;
+    std::vector<std::string> kv_direct_tri_warmup_prompts;
+    int  kv_direct_tri_n_bands     = 8;
+    float kv_direct_tri_score_threshold = 0.3f;
+    enum ggml_type kv_direct_tri_res_dtype = GGML_TYPE_COUNT;
+    std::vector<int> kv_direct_tri_attention_layers;
 
     std::string cache_type_k = "f16"; // KV cache data type for the K
     std::string cache_type_v = "f16"; // KV cache data type for the V
